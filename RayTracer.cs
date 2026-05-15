@@ -309,13 +309,15 @@ namespace RayTracer
         const int InitialWidth = 600;
         const int InitialHeight = 600;
         const float OrbitSensitivity = 0.008f;
+        const float PanSensitivity = 0.0015f;
         const float MinPitch = -1.4f;
         const float MaxPitch = 1.4f;
         const float MinRadius = 1.5f;
         const float MaxRadius = 40f;
 
+        enum DragMode { None, Orbit, Pan }
+
         readonly OrbitPictureBox pictureBox;
-        readonly System.Windows.Forms.Timer flushTimer;
 
         Bitmap bitmap;
         int[] pixelBuffer;
@@ -324,11 +326,11 @@ namespace RayTracer
         bool rendering;
         bool pendingRender;
 
-        readonly Vector orbitTarget = new Vector(0, 0.5f, 0);
+        Vector orbitTarget = new Vector(0, 0.5f, 0);
         float orbitYaw, orbitPitch, orbitRadius;
 
+        DragMode dragMode;
         Point lastMousePos;
-        bool dragging;
 
         public RayTracerForm()
         {
@@ -353,11 +355,8 @@ namespace RayTracer
 
             ClientSize = new System.Drawing.Size(InitialWidth, InitialHeight);
             MinimumSize = new System.Drawing.Size(120, 120);
-            Text = "Ray Tracer — drag to orbit, wheel to zoom";
+            Text = "Ray Tracer — left drag: orbit, right drag: pan, wheel: zoom";
             DoubleBuffered = true;
-
-            flushTimer = new System.Windows.Forms.Timer { Interval = 100 };
-            flushTimer.Tick += (_, __) => FlushBuffer();
 
             Load += (_, __) => ScheduleRender();
             ClientSizeChanged += (_, __) => ScheduleRender(cancelCurrent: true);
@@ -379,29 +378,48 @@ namespace RayTracer
 
         void OnMouseDown(object sender, MouseEventArgs e)
         {
-            if (e.Button != MouseButtons.Left) return;
-            dragging = true;
+            if (dragMode != DragMode.None) return;
+            if (e.Button == MouseButtons.Left) dragMode = DragMode.Orbit;
+            else if (e.Button == MouseButtons.Right) dragMode = DragMode.Pan;
+            else return;
             lastMousePos = e.Location;
             pictureBox.Cursor = Cursors.SizeAll;
         }
 
         void OnMouseUp(object sender, MouseEventArgs e)
         {
-            if (e.Button != MouseButtons.Left) return;
-            dragging = false;
-            pictureBox.Cursor = Cursors.Hand;
+            if ((e.Button == MouseButtons.Left && dragMode == DragMode.Orbit) ||
+                (e.Button == MouseButtons.Right && dragMode == DragMode.Pan))
+            {
+                dragMode = DragMode.None;
+                pictureBox.Cursor = Cursors.Hand;
+            }
         }
 
         void OnMouseMove(object sender, MouseEventArgs e)
         {
-            if (!dragging) return;
+            if (dragMode == DragMode.None) return;
             var dx = e.X - lastMousePos.X;
             var dy = e.Y - lastMousePos.Y;
             lastMousePos = e.Location;
-            orbitYaw -= dx * OrbitSensitivity;
-            orbitPitch += dy * OrbitSensitivity;
-            if (orbitPitch < MinPitch) orbitPitch = MinPitch;
-            if (orbitPitch > MaxPitch) orbitPitch = MaxPitch;
+
+            if (dragMode == DragMode.Orbit)
+            {
+                orbitYaw -= dx * OrbitSensitivity;
+                orbitPitch += dy * OrbitSensitivity;
+                if (orbitPitch < MinPitch) orbitPitch = MinPitch;
+                if (orbitPitch > MaxPitch) orbitPitch = MaxPitch;
+            }
+            else
+            {
+                // Pan: translate orbitTarget in the camera plane. Camera.Right and .Up
+                // are scaled by 1.5 in Camera.Create, so divide back to unit vectors.
+                var cam = GetOrbitCamera();
+                var camRight = cam.Right / 1.5f;
+                var camUp = cam.Up / 1.5f;
+                var step = orbitRadius * PanSensitivity;
+                orbitTarget -= dx * step * camRight + dy * step * camUp;
+            }
             ScheduleRender();
         }
 
@@ -428,7 +446,6 @@ namespace RayTracer
         {
             rendering = true;
             pendingRender = false;
-            flushTimer.Stop();
 
             var w = ClientSize.Width;
             var h = ClientSize.Height;
@@ -451,7 +468,6 @@ namespace RayTracer
             var token = cts.Token;
             var scene = RayTracer.CreateScene(GetOrbitCamera());
 
-            flushTimer.Start();
             var sw = Stopwatch.StartNew();
 
             Task.Run(() =>
@@ -464,7 +480,6 @@ namespace RayTracer
                 rt.Render(scene, token);
             }, token).ContinueWith(t =>
             {
-                flushTimer.Stop();
                 var sizeStillMatches = bufferWidth == w && bufferHeight == h;
                 var cancelled = token.IsCancellationRequested || t.IsCanceled;
                 if (!cancelled && !t.IsFaulted && sizeStillMatches)
