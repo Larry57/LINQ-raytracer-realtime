@@ -3,6 +3,7 @@ using System.Drawing.Imaging;
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -78,14 +79,16 @@ namespace RayTracer
             return Color.Plus(naturalColor, reflectColor);
         }
 
-        internal void Render(Scene scene)
+        internal void Render(Scene scene, CancellationToken cancellationToken = default)
         {
-            Parallel.For(0, screenHeight, y =>
+            var scale = 2.0 * screenHeight;
+            var options = new ParallelOptions { CancellationToken = cancellationToken };
+            Parallel.For(0, screenHeight, options, y =>
             {
-                var recenterY = -(y - (screenHeight / 2.0)) / (2.0 * screenHeight);
+                var recenterY = -(y - (screenHeight / 2.0)) / scale;
                 for (int x = 0; x < screenWidth; x++)
                 {
-                    var recenterX = (x - (screenWidth / 2.0)) / (2.0 * screenWidth);
+                    var recenterX = (x - (screenWidth / 2.0)) / scale;
                     var point = Vector.Norm(Vector.Plus(scene.Camera.Forward,
                         Vector.Plus(Vector.Times(recenterX, scene.Camera.Right),
                                     Vector.Times(recenterY, scene.Camera.Up))));
@@ -363,61 +366,108 @@ namespace RayTracer
 
     public class RayTracerForm : Form
     {
-        const int width = 600;
-        const int height = 600;
+        const int InitialWidth = 600;
+        const int InitialHeight = 600;
+        const int ResizeDebounceMs = 150;
 
-        readonly Bitmap bitmap;
         readonly PictureBox pictureBox;
-        readonly int[] pixelBuffer;
-        System.Windows.Forms.Timer flushTimer;
+        readonly System.Windows.Forms.Timer resizeDebounce;
+        readonly System.Windows.Forms.Timer flushTimer;
+
+        Bitmap bitmap;
+        int[] pixelBuffer;
+        int bufferWidth, bufferHeight;
+        CancellationTokenSource renderCts;
 
         public RayTracerForm()
         {
-            bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-            pixelBuffer = new int[width * height];
-
             pictureBox = new PictureBox
             {
                 Dock = DockStyle.Fill,
                 SizeMode = PictureBoxSizeMode.Normal,
-                Image = bitmap
+                BackColor = System.Drawing.Color.Black
             };
-
-            ClientSize = new System.Drawing.Size(width, height);
             Controls.Add(pictureBox);
-            Text = "Ray Tracer";
-            Load += RayTracerForm_Load;
-        }
 
-        void RayTracerForm_Load(object sender, EventArgs e)
-        {
+            ClientSize = new System.Drawing.Size(InitialWidth, InitialHeight);
+            MinimumSize = new System.Drawing.Size(120, 120);
+            Text = "Ray Tracer";
+            DoubleBuffered = true;
+
+            resizeDebounce = new System.Windows.Forms.Timer { Interval = ResizeDebounceMs };
+            resizeDebounce.Tick += (_, __) => { resizeDebounce.Stop(); StartRender(); };
+
             flushTimer = new System.Windows.Forms.Timer { Interval = 100 };
             flushTimer.Tick += (_, __) => FlushBuffer();
-            flushTimer.Start();
 
+            Load += (_, __) => StartRender();
+            ClientSizeChanged += OnClientSizeChanged;
+        }
+
+        void OnClientSizeChanged(object sender, EventArgs e)
+        {
+            if (!IsHandleCreated) return;
+            if (WindowState == FormWindowState.Minimized) return;
+            if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+            resizeDebounce.Stop();
+            resizeDebounce.Start();
+        }
+
+        void StartRender()
+        {
+            renderCts?.Cancel();
+            flushTimer.Stop();
+
+            var w = ClientSize.Width;
+            var h = ClientSize.Height;
+            if (w <= 0 || h <= 0) return;
+
+            bufferWidth = w;
+            bufferHeight = h;
+
+            var oldBitmap = bitmap;
+            bitmap = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+            pixelBuffer = new int[w * h];
+            pictureBox.Image = bitmap;
+            oldBitmap?.Dispose();
+
+            var cts = new CancellationTokenSource();
+            renderCts = cts;
+            var buf = pixelBuffer;
+            var token = cts.Token;
+
+            flushTimer.Start();
             var sw = Stopwatch.StartNew();
+
             Task.Run(() =>
             {
-                var rt = new RayTracer(width, height, (x, y, color) =>
-                    pixelBuffer[y * width + x] = color.ToArgb());
-                rt.Render(rt.DefaultScene);
-            }).ContinueWith(_ =>
+                var rt = new RayTracer(w, h, (x, y, color) =>
+                {
+                    if (token.IsCancellationRequested) return;
+                    buf[y * w + x] = color.ToArgb();
+                });
+                rt.Render(rt.DefaultScene, token);
+            }, token).ContinueWith(t =>
             {
+                if (token.IsCancellationRequested || t.IsCanceled || t.IsFaulted) return;
                 flushTimer.Stop();
                 FlushBuffer();
                 sw.Stop();
-                Text = $"Ray Tracer — {sw.ElapsedMilliseconds} ms ({Environment.ProcessorCount} threads)";
+                Text = $"Ray Tracer — {w}×{h} — {sw.ElapsedMilliseconds} ms ({Environment.ProcessorCount} threads)";
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
         void FlushBuffer()
         {
-            var data = bitmap.LockBits(
-                new Rectangle(0, 0, width, height),
+            var bmp = bitmap;
+            var buf = pixelBuffer;
+            if (bmp == null || buf == null) return;
+            var data = bmp.LockBits(
+                new Rectangle(0, 0, bufferWidth, bufferHeight),
                 ImageLockMode.WriteOnly,
                 PixelFormat.Format32bppArgb);
-            Marshal.Copy(pixelBuffer, 0, data.Scan0, pixelBuffer.Length);
-            bitmap.UnlockBits(data);
+            Marshal.Copy(buf, 0, data.Scan0, buf.Length);
+            bmp.UnlockBits(data);
             pictureBox.Invalidate();
         }
 
