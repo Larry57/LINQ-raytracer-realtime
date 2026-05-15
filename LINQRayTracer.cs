@@ -1,8 +1,5 @@
 using System.Drawing;
-using System.Linq;
 using System;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.Windows.Forms;
 
 namespace RayTracer
@@ -22,94 +19,74 @@ namespace RayTracer
             this.setPixel = setPixel;
         }
 
-        private class Wrap<T>
+        private Color TraceRay(Ray ray, Scene scene, int depth)
         {
-            public readonly Func<Wrap<T>, T> It;
-            public Wrap(Func<Wrap<T>, T> it) { It = it; }
-        }
+            ISect nearest = null;
+            foreach (var thing in scene.Things)
+            {
+                var isect = thing.Intersect(ray);
+                if (isect != null && (nearest == null || isect.Dist < nearest.Dist))
+                    nearest = isect;
+            }
+            if (nearest == null) return Color.Background;
 
-        public static Func<T, U> Y<T, U>(Func<Func<T, U>, Func<T, U>> f)
-        {
-            Func<Wrap<Func<T, U>>, Func<T, U>> g = wx => f(wx.It(wx));
-            return g(new Wrap<Func<T, U>>(wx => f(y => wx.It(wx)(y))));
-        }
+            var d = nearest.Ray.Dir;
+            var pos = Vector.Plus(Vector.Times(nearest.Dist, d), nearest.Ray.Start);
+            var normal = nearest.Thing.Normal(pos);
+            var reflectDir = Vector.Minus(d, Vector.Times(2 * Vector.Dot(normal, d), normal));
 
-        class TraceRayArgs
-        {
-            public readonly Ray Ray;
-            public readonly Scene Scene;
-            public readonly int Depth;
+            var naturalColor = Color.Background;
+            foreach (var light in scene.Lights)
+            {
+                var ldis = Vector.Minus(light.Pos, pos);
+                var livec = Vector.Norm(ldis);
+                var testRay = new Ray { Start = pos, Dir = livec };
 
-            public TraceRayArgs(Ray ray, Scene scene, int depth) { Ray = ray; Scene = scene; Depth = depth; }
+                double neatIsect = 0;
+                foreach (var thing in scene.Things)
+                {
+                    var inter = thing.Intersect(testRay);
+                    if (inter != null && (neatIsect == 0 || inter.Dist < neatIsect))
+                        neatIsect = inter.Dist;
+                }
+                var isInShadow = !((neatIsect > Vector.Mag(ldis)) || (neatIsect == 0));
+                if (isInShadow) continue;
+
+                var illum = Vector.Dot(livec, normal);
+                var lcolor = illum > 0 ? Color.Times(illum, light.Color) : Color.Make(0, 0, 0);
+                var specular = Vector.Dot(livec, Vector.Norm(reflectDir));
+                var scolor = specular > 0
+                    ? Color.Times(Math.Pow(specular, nearest.Thing.Surface.Roughness), light.Color)
+                    : Color.Make(0, 0, 0);
+                naturalColor = Color.Plus(naturalColor,
+                    Color.Plus(Color.Times(nearest.Thing.Surface.Diffuse(pos), lcolor),
+                               Color.Times(nearest.Thing.Surface.Specular(pos), scolor)));
+            }
+
+            var reflectPos = Vector.Plus(pos, Vector.Times(.001, reflectDir));
+            var reflectColor = depth >= MaxDepth
+                ? Color.Make(.5, .5, .5)
+                : Color.Times(nearest.Thing.Surface.Reflect(reflectPos),
+                              TraceRay(new Ray { Start = reflectPos, Dir = reflectDir }, scene, depth + 1));
+
+            return Color.Plus(naturalColor, reflectColor);
         }
 
         internal void Render(Scene scene)
         {
-            var pixelsQuery =
-                from y in Enumerable.Range(0, screenHeight)
-                let recenterY = -(y - (screenHeight / 2.0)) / (2.0 * screenHeight)
-                select from x in Enumerable.Range(0, screenWidth)
-                       let recenterX = (x - (screenWidth / 2.0)) / (2.0 * screenWidth)
-                       let point =
-                           Vector.Norm(Vector.Plus(scene.Camera.Forward,
-                                                   Vector.Plus(Vector.Times(recenterX, scene.Camera.Right),
-                                                               Vector.Times(recenterY, scene.Camera.Up))))
-                       let ray = new Ray() { Start = scene.Camera.Pos, Dir = point }
-                       let computeTraceRay = (Func<Func<TraceRayArgs, Color>, Func<TraceRayArgs, Color>>)
-                        (f => traceRayArgs =>
-                         (from isect in
-                              from thing in traceRayArgs.Scene.Things
-                              select thing.Intersect(traceRayArgs.Ray)
-                          where isect != null
-                          orderby isect.Dist
-                          let d = isect.Ray.Dir
-                          let pos = Vector.Plus(Vector.Times(isect.Dist, isect.Ray.Dir), isect.Ray.Start)
-                          let normal = isect.Thing.Normal(pos)
-                          let reflectDir = Vector.Minus(d, Vector.Times(2 * Vector.Dot(normal, d), normal))
-                          let naturalColors =
-                              from light in traceRayArgs.Scene.Lights
-                              let ldis = Vector.Minus(light.Pos, pos)
-                              let livec = Vector.Norm(ldis)
-                              let testRay = new Ray() { Start = pos, Dir = livec }
-                              let testIsects = from inter in
-                                                   from thing in traceRayArgs.Scene.Things
-                                                   select thing.Intersect(testRay)
-                                               where inter != null
-                                               orderby inter.Dist
-                                               select inter
-                              let testIsect = testIsects.FirstOrDefault()
-                              let neatIsect = testIsect == null ? 0 : testIsect.Dist
-                              let isInShadow = !((neatIsect > Vector.Mag(ldis)) || (neatIsect == 0))
-                              where !isInShadow
-                              let illum = Vector.Dot(livec, normal)
-                              let lcolor = illum > 0 ? Color.Times(illum, light.Color) : Color.Make(0, 0, 0)
-                              let specular = Vector.Dot(livec, Vector.Norm(reflectDir))
-                              let scolor = specular > 0
-                                             ? Color.Times(Math.Pow(specular, isect.Thing.Surface.Roughness),
-                                                           light.Color)
-                                             : Color.Make(0, 0, 0)
-                              select Color.Plus(Color.Times(isect.Thing.Surface.Diffuse(pos), lcolor),
-                                                Color.Times(isect.Thing.Surface.Specular(pos), scolor))
-                          let reflectPos = Vector.Plus(pos, Vector.Times(.001, reflectDir))
-                          let reflectColor = traceRayArgs.Depth >= MaxDepth
-                                              ? Color.Make(.5, .5, .5)
-                                              : Color.Times(isect.Thing.Surface.Reflect(reflectPos),
-                                                            f(new TraceRayArgs(new Ray()
-                                                            {
-                                                                Start = reflectPos,
-                                                                Dir = reflectDir
-                                                            },
-                                                                               traceRayArgs.Scene,
-                                                                               traceRayArgs.Depth + 1)))
-                          select naturalColors.Aggregate(reflectColor,
-                                                         (color, natColor) => Color.Plus(color, natColor))
-                         ).DefaultIfEmpty(Color.Background).First())
-                       let traceRay = Y(computeTraceRay)
-                       select new { X = x, Y = y, Color = traceRay(new TraceRayArgs(ray, scene, 0)) };
-
-            foreach (var row in pixelsQuery)
-                foreach (var pixel in row)
-                    setPixel(pixel.X, pixel.Y, pixel.Color.ToDrawingColor());
+            for (int y = 0; y < screenHeight; y++)
+            {
+                var recenterY = -(y - (screenHeight / 2.0)) / (2.0 * screenHeight);
+                for (int x = 0; x < screenWidth; x++)
+                {
+                    var recenterX = (x - (screenWidth / 2.0)) / (2.0 * screenWidth);
+                    var point = Vector.Norm(Vector.Plus(scene.Camera.Forward,
+                        Vector.Plus(Vector.Times(recenterX, scene.Camera.Right),
+                                    Vector.Times(recenterY, scene.Camera.Up))));
+                    var ray = new Ray { Start = scene.Camera.Pos, Dir = point };
+                    setPixel(x, y, TraceRay(ray, scene, 0).ToDrawingColor());
+                }
+            }
         }
 
         internal readonly Scene DefaultScene =
@@ -216,10 +193,6 @@ namespace RayTracer
             return new Vector(((v1.Y * v2.Z) - (v1.Z * v2.Y)),
                               ((v1.Z * v2.X) - (v1.X * v2.Z)),
                               ((v1.X * v2.Y) - (v1.Y * v2.X)));
-        }
-        public static bool Equals(Vector v1, Vector v2)
-        {
-            return (v1.X == v2.X) && (v1.Y == v2.Y) && (v1.Z == v2.Z);
         }
     }
 
@@ -380,15 +353,7 @@ namespace RayTracer
         public SceneObject[] Things;
         public Light[] Lights;
         public Camera Camera;
-
-        public IEnumerable<ISect> Intersect(Ray r)
-        {
-            return from thing in Things
-                   select thing.Intersect(r);
-        }
     }
-
-    public delegate void Action<T, U, V>(T t, U u, V v);
 
     public partial class RayTracerForm : Form
     {
