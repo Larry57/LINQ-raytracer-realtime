@@ -99,44 +99,23 @@ namespace RayTracer
             });
         }
 
-        internal readonly Scene DefaultScene =
-            new Scene()
-            {
-                Things = new SceneObject[] {
-                                new Plane() {
-                                    Norm = new Vector(0, 1, 0),
-                                    Offset = 0,
-                                    Surface = Surfaces.CheckerBoard
-                                },
-                                new Sphere() {
-                                    Center = new Vector(0, 1, 0),
-                                    Radius = 1f,
-                                    Surface = Surfaces.Shiny
-                                },
-                                new Sphere() {
-                                    Center = new Vector(-1, .5f, 1.5f),
-                                    Radius = .5f,
-                                    Surface = Surfaces.Shiny
-                                }},
-                Lights = new Light[] {
-                                new Light() {
-                                    Pos = new Vector(-2, 2.5f, 0),
-                                    Color = Color.Make(.49, .07, .07)
-                                },
-                                new Light() {
-                                    Pos = new Vector(1.5f, 2.5f, 1.5f),
-                                    Color = Color.Make(.07, .07, .49)
-                                },
-                                new Light() {
-                                    Pos = new Vector(1.5f, 2.5f, -1.5f),
-                                    Color = Color.Make(.07, .49, .071)
-                                },
-                                new Light() {
-                                    Pos = new Vector(0, 3.5f, 0),
-                                    Color = Color.Make(.21, .21, .35)
-                                }},
-                Camera = Camera.Create(new Vector(3, 2, 4), new Vector(-1, .5f, 0))
-            };
+        internal static readonly SceneObject[] DefaultThings = new SceneObject[]
+        {
+            new Plane  { Norm = new Vector(0, 1, 0), Offset = 0,  Surface = Surfaces.CheckerBoard },
+            new Sphere { Center = new Vector(0, 1, 0),     Radius = 1f,  Surface = Surfaces.Shiny },
+            new Sphere { Center = new Vector(-1, .5f, 1.5f), Radius = .5f, Surface = Surfaces.Shiny }
+        };
+
+        internal static readonly Light[] DefaultLights = new Light[]
+        {
+            new Light { Pos = new Vector(-2,   2.5f,  0),    Color = Color.Make(.49, .07, .07) },
+            new Light { Pos = new Vector( 1.5f, 2.5f, 1.5f), Color = Color.Make(.07, .07, .49) },
+            new Light { Pos = new Vector( 1.5f, 2.5f, -1.5f),Color = Color.Make(.07, .49, .071) },
+            new Light { Pos = new Vector( 0,   3.5f,  0),    Color = Color.Make(.21, .21, .35) }
+        };
+
+        internal static Scene CreateScene(Camera camera) =>
+            new Scene { Things = DefaultThings, Lights = DefaultLights, Camera = camera };
     }
 
     static class Surfaces
@@ -329,10 +308,15 @@ namespace RayTracer
     {
         const int InitialWidth = 600;
         const int InitialHeight = 600;
-        const int ResizeDebounceMs = 150;
+        const int RenderDebounceMs = 40;
+        const float OrbitSensitivity = 0.008f;
+        const float MinPitch = -1.4f;
+        const float MaxPitch = 1.4f;
+        const float MinRadius = 1.5f;
+        const float MaxRadius = 40f;
 
-        readonly PictureBox pictureBox;
-        readonly System.Windows.Forms.Timer resizeDebounce;
+        readonly OrbitPictureBox pictureBox;
+        readonly System.Windows.Forms.Timer renderDebounce;
         readonly System.Windows.Forms.Timer flushTimer;
 
         Bitmap bitmap;
@@ -340,38 +324,102 @@ namespace RayTracer
         int bufferWidth, bufferHeight;
         CancellationTokenSource renderCts;
 
+        readonly Vector orbitTarget = new Vector(0, 0.5f, 0);
+        float orbitYaw, orbitPitch, orbitRadius;
+
+        Point lastMousePos;
+        bool dragging;
+
         public RayTracerForm()
         {
-            pictureBox = new PictureBox
+            var initialPos = new Vector(3, 2, 4);
+            var initialOffset = initialPos - orbitTarget;
+            orbitRadius = initialOffset.Length();
+            orbitYaw = MathF.Atan2(initialOffset.X, initialOffset.Z);
+            orbitPitch = MathF.Asin(initialOffset.Y / orbitRadius);
+
+            pictureBox = new OrbitPictureBox
             {
                 Dock = DockStyle.Fill,
                 SizeMode = PictureBoxSizeMode.Normal,
-                BackColor = System.Drawing.Color.Black
+                BackColor = System.Drawing.Color.Black,
+                Cursor = Cursors.Hand
             };
+            pictureBox.MouseDown += OnMouseDown;
+            pictureBox.MouseUp += OnMouseUp;
+            pictureBox.MouseMove += OnMouseMove;
+            pictureBox.MouseWheel += OnMouseWheel;
             Controls.Add(pictureBox);
 
             ClientSize = new System.Drawing.Size(InitialWidth, InitialHeight);
             MinimumSize = new System.Drawing.Size(120, 120);
-            Text = "Ray Tracer";
+            Text = "Ray Tracer — drag to orbit, wheel to zoom";
             DoubleBuffered = true;
 
-            resizeDebounce = new System.Windows.Forms.Timer { Interval = ResizeDebounceMs };
-            resizeDebounce.Tick += (_, __) => { resizeDebounce.Stop(); StartRender(); };
+            renderDebounce = new System.Windows.Forms.Timer { Interval = RenderDebounceMs };
+            renderDebounce.Tick += (_, __) => { renderDebounce.Stop(); StartRender(); };
 
             flushTimer = new System.Windows.Forms.Timer { Interval = 100 };
             flushTimer.Tick += (_, __) => FlushBuffer();
 
             Load += (_, __) => StartRender();
-            ClientSizeChanged += OnClientSizeChanged;
+            ClientSizeChanged += (_, __) => ScheduleRender();
         }
 
-        void OnClientSizeChanged(object sender, EventArgs e)
+        void ScheduleRender()
         {
             if (!IsHandleCreated) return;
             if (WindowState == FormWindowState.Minimized) return;
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
-            resizeDebounce.Stop();
-            resizeDebounce.Start();
+            renderDebounce.Stop();
+            renderDebounce.Start();
+        }
+
+        void OnMouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            dragging = true;
+            lastMousePos = e.Location;
+            pictureBox.Cursor = Cursors.SizeAll;
+        }
+
+        void OnMouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            dragging = false;
+            pictureBox.Cursor = Cursors.Hand;
+        }
+
+        void OnMouseMove(object sender, MouseEventArgs e)
+        {
+            if (!dragging) return;
+            var dx = e.X - lastMousePos.X;
+            var dy = e.Y - lastMousePos.Y;
+            lastMousePos = e.Location;
+            orbitYaw -= dx * OrbitSensitivity;
+            orbitPitch += dy * OrbitSensitivity;
+            if (orbitPitch < MinPitch) orbitPitch = MinPitch;
+            if (orbitPitch > MaxPitch) orbitPitch = MaxPitch;
+            ScheduleRender();
+        }
+
+        void OnMouseWheel(object sender, MouseEventArgs e)
+        {
+            var factor = e.Delta > 0 ? 0.9f : 1.1f;
+            orbitRadius *= factor;
+            if (orbitRadius < MinRadius) orbitRadius = MinRadius;
+            if (orbitRadius > MaxRadius) orbitRadius = MaxRadius;
+            ScheduleRender();
+        }
+
+        Camera GetOrbitCamera()
+        {
+            var cp = MathF.Cos(orbitPitch);
+            var pos = orbitTarget + new Vector(
+                orbitRadius * cp * MathF.Sin(orbitYaw),
+                orbitRadius * MathF.Sin(orbitPitch),
+                orbitRadius * cp * MathF.Cos(orbitYaw));
+            return Camera.Create(pos, orbitTarget);
         }
 
         void StartRender()
@@ -383,19 +431,22 @@ namespace RayTracer
             var h = ClientSize.Height;
             if (w <= 0 || h <= 0) return;
 
-            bufferWidth = w;
-            bufferHeight = h;
-
-            var oldBitmap = bitmap;
-            bitmap = new Bitmap(w, h, PixelFormat.Format32bppArgb);
-            pixelBuffer = new int[w * h];
-            pictureBox.Image = bitmap;
-            oldBitmap?.Dispose();
+            if (bufferWidth != w || bufferHeight != h)
+            {
+                bufferWidth = w;
+                bufferHeight = h;
+                var oldBitmap = bitmap;
+                bitmap = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+                pixelBuffer = new int[w * h];
+                pictureBox.Image = bitmap;
+                oldBitmap?.Dispose();
+            }
 
             var cts = new CancellationTokenSource();
             renderCts = cts;
             var buf = pixelBuffer;
             var token = cts.Token;
+            var scene = RayTracer.CreateScene(GetOrbitCamera());
 
             flushTimer.Start();
             var sw = Stopwatch.StartNew();
@@ -407,14 +458,14 @@ namespace RayTracer
                     if (token.IsCancellationRequested) return;
                     buf[y * w + x] = color.ToArgb();
                 });
-                rt.Render(rt.DefaultScene, token);
+                rt.Render(scene, token);
             }, token).ContinueWith(t =>
             {
                 if (token.IsCancellationRequested || t.IsCanceled || t.IsFaulted) return;
                 flushTimer.Stop();
                 FlushBuffer();
                 sw.Stop();
-                Text = $"Ray Tracer — {w}×{h} — {sw.ElapsedMilliseconds} ms ({Environment.ProcessorCount} threads)";
+                Text = $"Ray Tracer — {w}×{h} — {sw.ElapsedMilliseconds} ms";
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
@@ -439,5 +490,12 @@ namespace RayTracer
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new RayTracerForm());
         }
+    }
+
+    // PictureBox that takes focus on hover so MouseWheel events route to it.
+    class OrbitPictureBox : PictureBox
+    {
+        public OrbitPictureBox() { SetStyle(ControlStyles.Selectable, true); }
+        protected override void OnMouseEnter(EventArgs e) { Focus(); base.OnMouseEnter(e); }
     }
 }
