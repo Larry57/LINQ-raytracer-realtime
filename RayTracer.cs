@@ -308,7 +308,6 @@ namespace RayTracer
     {
         const int InitialWidth = 600;
         const int InitialHeight = 600;
-        const int RenderDebounceMs = 40;
         const float OrbitSensitivity = 0.008f;
         const float MinPitch = -1.4f;
         const float MaxPitch = 1.4f;
@@ -316,13 +315,14 @@ namespace RayTracer
         const float MaxRadius = 40f;
 
         readonly OrbitPictureBox pictureBox;
-        readonly System.Windows.Forms.Timer renderDebounce;
         readonly System.Windows.Forms.Timer flushTimer;
 
         Bitmap bitmap;
         int[] pixelBuffer;
         int bufferWidth, bufferHeight;
         CancellationTokenSource renderCts;
+        bool rendering;
+        bool pendingRender;
 
         readonly Vector orbitTarget = new Vector(0, 0.5f, 0);
         float orbitYaw, orbitPitch, orbitRadius;
@@ -356,23 +356,25 @@ namespace RayTracer
             Text = "Ray Tracer — drag to orbit, wheel to zoom";
             DoubleBuffered = true;
 
-            renderDebounce = new System.Windows.Forms.Timer { Interval = RenderDebounceMs };
-            renderDebounce.Tick += (_, __) => { renderDebounce.Stop(); StartRender(); };
-
             flushTimer = new System.Windows.Forms.Timer { Interval = 100 };
             flushTimer.Tick += (_, __) => FlushBuffer();
 
-            Load += (_, __) => StartRender();
-            ClientSizeChanged += (_, __) => ScheduleRender();
+            Load += (_, __) => ScheduleRender();
+            ClientSizeChanged += (_, __) => ScheduleRender(cancelCurrent: true);
         }
 
-        void ScheduleRender()
+        void ScheduleRender(bool cancelCurrent = false)
         {
             if (!IsHandleCreated) return;
             if (WindowState == FormWindowState.Minimized) return;
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
-            renderDebounce.Stop();
-            renderDebounce.Start();
+            if (cancelCurrent) renderCts?.Cancel();
+            if (rendering)
+            {
+                pendingRender = true;
+                return;
+            }
+            StartRender();
         }
 
         void OnMouseDown(object sender, MouseEventArgs e)
@@ -424,12 +426,13 @@ namespace RayTracer
 
         void StartRender()
         {
-            renderCts?.Cancel();
+            rendering = true;
+            pendingRender = false;
             flushTimer.Stop();
 
             var w = ClientSize.Width;
             var h = ClientSize.Height;
-            if (w <= 0 || h <= 0) return;
+            if (w <= 0 || h <= 0) { rendering = false; return; }
 
             if (bufferWidth != w || bufferHeight != h)
             {
@@ -461,11 +464,17 @@ namespace RayTracer
                 rt.Render(scene, token);
             }, token).ContinueWith(t =>
             {
-                if (token.IsCancellationRequested || t.IsCanceled || t.IsFaulted) return;
                 flushTimer.Stop();
-                FlushBuffer();
-                sw.Stop();
-                Text = $"Ray Tracer — {w}×{h} — {sw.ElapsedMilliseconds} ms";
+                var sizeStillMatches = bufferWidth == w && bufferHeight == h;
+                var cancelled = token.IsCancellationRequested || t.IsCanceled;
+                if (!cancelled && !t.IsFaulted && sizeStillMatches)
+                {
+                    FlushBuffer();
+                    sw.Stop();
+                    Text = $"Ray Tracer — {w}×{h} — {sw.ElapsedMilliseconds} ms";
+                }
+                rendering = false;
+                if (pendingRender) StartRender();
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
