@@ -10,11 +10,12 @@ namespace RayTracer
 {
     public class RayTracer
     {
-        private int screenWidth;
-        private int screenHeight;
         private const int MaxDepth = 5;
+        private const double ShadowEpsilon = 1e-4;
 
-        public Action<int, int, System.Drawing.Color> setPixel;
+        private readonly int screenWidth;
+        private readonly int screenHeight;
+        private readonly Action<int, int, System.Drawing.Color> setPixel;
 
         public RayTracer(int screenWidth, int screenHeight, Action<int, int, System.Drawing.Color> setPixel)
         {
@@ -39,12 +40,13 @@ namespace RayTracer
             var normal = nearest.Thing.Normal(pos);
             var reflectDir = Vector.Minus(d, Vector.Times(2 * Vector.Dot(normal, d), normal));
 
+            var shadowOrigin = Vector.Plus(pos, Vector.Times(ShadowEpsilon, normal));
             var naturalColor = Color.Background;
             foreach (var light in scene.Lights)
             {
                 var ldis = Vector.Minus(light.Pos, pos);
                 var livec = Vector.Norm(ldis);
-                var testRay = new Ray { Start = pos, Dir = livec };
+                var testRay = new Ray { Start = shadowOrigin, Dir = livec };
 
                 double neatIsect = 0;
                 foreach (var thing in scene.Things)
@@ -202,9 +204,9 @@ namespace RayTracer
 
     public class Color
     {
-        public double R;
-        public double G;
-        public double B;
+        public readonly double R;
+        public readonly double G;
+        public readonly double B;
 
         public Color(double r, double g, double b) { R = r; G = g; B = b; }
 
@@ -231,9 +233,9 @@ namespace RayTracer
         public static readonly Color Background = Make(0, 0, 0);
         public static readonly Color DefaultColor = Make(0, 0, 0);
 
-        private double Legalize(double d)
+        private static double Legalize(double d)
         {
-            return d > 1 ? 1 : d;
+            return d > 1 ? 1 : d < 0 ? 0 : d;
         }
 
         public System.Drawing.Color ToDrawingColor()
