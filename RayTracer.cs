@@ -99,11 +99,16 @@ namespace RayTracer
             });
         }
 
-        internal static readonly SceneObject[] DefaultThings = new SceneObject[]
+        internal const float BouncingBallRadius = 0.5f;
+
+        static readonly Plane GroundPlane = new Plane
         {
-            new Plane  { Norm = new Vector(0, 1, 0), Offset = 0,  Surface = Surfaces.CheckerBoard },
-            new Sphere { Center = new Vector(0, 1, 0),     Radius = 1f,  Surface = Surfaces.Shiny },
-            new Sphere { Center = new Vector(-1, .5f, 1.5f), Radius = .5f, Surface = Surfaces.Shiny }
+            Norm = new Vector(0, 1, 0), Offset = 0, Surface = Surfaces.CheckerBoard
+        };
+
+        static readonly Sphere BigSphere = new Sphere
+        {
+            Center = new Vector(0, 1, 0), Radius = 1f, Surface = Surfaces.Shiny
         };
 
         internal static readonly Light[] DefaultLights = new Light[]
@@ -114,8 +119,18 @@ namespace RayTracer
             new Light { Pos = new Vector( 0,   3.5f,  0),    Color = Color.Make(.21, .21, .35) }
         };
 
-        internal static Scene CreateScene(Camera camera) =>
-            new Scene { Things = DefaultThings, Lights = DefaultLights, Camera = camera };
+        internal static Scene CreateScene(Camera camera, Vector bouncingBallCenter) =>
+            new Scene
+            {
+                Things = new SceneObject[]
+                {
+                    GroundPlane,
+                    BigSphere,
+                    new Sphere { Center = bouncingBallCenter, Radius = BouncingBallRadius, Surface = Surfaces.Shiny }
+                },
+                Lights = DefaultLights,
+                Camera = camera
+            };
     }
 
     static class Surfaces
@@ -315,9 +330,18 @@ namespace RayTracer
         const float MinRadius = 1.5f;
         const float MaxRadius = 40f;
 
+        // Bouncing ball: parabola h(t) = 4 H t (P - t) / P^2 over period P, peak height H.
+        const float BallRestY = RayTracer.BouncingBallRadius;   // bottom of ball sits on the y=0 plane
+        const float BallX = -1f;
+        const float BallZ = 1.5f;
+        const float BounceHeight = 1.3f;
+        const float BouncePeriod = 1.1f;
+
         enum DragMode { None, Orbit, Pan }
 
         readonly OrbitPictureBox pictureBox;
+        readonly Stopwatch animationClock = Stopwatch.StartNew();
+        readonly System.Windows.Forms.Timer animationTimer;
 
         Bitmap bitmap;
         int[] pixelBuffer;
@@ -358,8 +382,19 @@ namespace RayTracer
             Text = "Ray Tracer — left drag: orbit, right drag: pan, wheel: zoom";
             DoubleBuffered = true;
 
+            animationTimer = new System.Windows.Forms.Timer { Interval = 16 };
+            animationTimer.Tick += (_, __) => ScheduleRender();
+            animationTimer.Start();
+
             Load += (_, __) => ScheduleRender();
             ClientSizeChanged += (_, __) => ScheduleRender(cancelCurrent: true);
+        }
+
+        Vector GetBouncingBallCenter()
+        {
+            var t = (float)(animationClock.Elapsed.TotalSeconds % BouncePeriod);
+            var h = 4f * BounceHeight * t * (BouncePeriod - t) / (BouncePeriod * BouncePeriod);
+            return new Vector(BallX, BallRestY + h, BallZ);
         }
 
         void ScheduleRender(bool cancelCurrent = false)
@@ -466,7 +501,7 @@ namespace RayTracer
             renderCts = cts;
             var buf = pixelBuffer;
             var token = cts.Token;
-            var scene = RayTracer.CreateScene(GetOrbitCamera());
+            var scene = RayTracer.CreateScene(GetOrbitCamera(), GetBouncingBallCenter());
 
             var sw = Stopwatch.StartNew();
 
