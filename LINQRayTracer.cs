@@ -37,15 +37,15 @@ namespace RayTracer
             if (nearest == null) return Color.Background;
 
             var d = nearest.Ray.Dir;
-            var pos = Vector.Plus(Vector.Times(nearest.Dist, d), nearest.Ray.Start);
+            var pos = nearest.Dist * d + nearest.Ray.Start;
             var normal = nearest.Thing.Normal(pos);
-            var reflectDir = Vector.Minus(d, Vector.Times(2 * Vector.Dot(normal, d), normal));
+            var reflectDir = d - (2 * Vector.Dot(normal, d)) * normal;
 
-            var shadowOrigin = Vector.Plus(pos, Vector.Times(ShadowEpsilon, normal));
+            var shadowOrigin = pos + ShadowEpsilon * normal;
             var naturalColor = Color.Background;
             foreach (var light in scene.Lights)
             {
-                var ldis = Vector.Minus(light.Pos, pos);
+                var ldis = light.Pos - pos;
                 var livec = Vector.Norm(ldis);
                 var testRay = new Ray { Start = shadowOrigin, Dir = livec };
 
@@ -70,7 +70,7 @@ namespace RayTracer
                                Color.Times(nearest.Thing.Surface.Specular(pos), scolor)));
             }
 
-            var reflectPos = Vector.Plus(pos, Vector.Times(.001, reflectDir));
+            var reflectPos = pos + .001 * reflectDir;
             var reflectColor = depth >= MaxDepth
                 ? Color.Make(.5, .5, .5)
                 : Color.Times(nearest.Thing.Surface.Reflect(reflectPos),
@@ -89,9 +89,9 @@ namespace RayTracer
                 for (int x = 0; x < screenWidth; x++)
                 {
                     var recenterX = (x - (screenWidth / 2.0)) / scale;
-                    var point = Vector.Norm(Vector.Plus(scene.Camera.Forward,
-                        Vector.Plus(Vector.Times(recenterX, scene.Camera.Right),
-                                    Vector.Times(recenterY, scene.Camera.Up))));
+                    var point = Vector.Norm(scene.Camera.Forward
+                        + recenterX * scene.Camera.Right
+                        + recenterY * scene.Camera.Up);
                     var ray = new Ray { Start = scene.Camera.Pos, Dir = point };
                     setPixel(x, y, TraceRay(ray, scene, 0).ToDrawingColor());
                 }
@@ -165,44 +165,27 @@ namespace RayTracer
             };
     }
 
-    class Vector
+    internal readonly record struct Vector(double X, double Y, double Z)
     {
-        public readonly double X;
-        public readonly double Y;
-        public readonly double Z;
+        public static Vector Make(double x, double y, double z) => new Vector(x, y, z);
 
-        public Vector(double x, double y, double z) { X = x; Y = y; Z = z; }
+        public static Vector operator +(Vector a, Vector b) => new Vector(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
+        public static Vector operator -(Vector a, Vector b) => new Vector(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
+        public static Vector operator *(double n, Vector v) => new Vector(v.X * n, v.Y * n, v.Z * n);
 
-        public static Vector Make(double x, double y, double z) { return new Vector(x, y, z); }
-        public static Vector Times(double n, Vector v)
-        {
-            return new Vector(v.X * n, v.Y * n, v.Z * n);
-        }
-        public static Vector Minus(Vector v1, Vector v2)
-        {
-            return new Vector(v1.X - v2.X, v1.Y - v2.Y, v1.Z - v2.Z);
-        }
-        public static Vector Plus(Vector v1, Vector v2)
-        {
-            return new Vector(v1.X + v2.X, v1.Y + v2.Y, v1.Z + v2.Z);
-        }
-        public static double Dot(Vector v1, Vector v2)
-        {
-            return (v1.X * v2.X) + (v1.Y * v2.Y) + (v1.Z * v2.Z);
-        }
-        public static double Mag(Vector v) { return Math.Sqrt(Dot(v, v)); }
+        public static double Dot(Vector a, Vector b) => a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+        public static double Mag(Vector v) => Math.Sqrt(Dot(v, v));
+
         public static Vector Norm(Vector v)
         {
-            double mag = Mag(v);
-            double div = mag == 0 ? double.PositiveInfinity : 1 / mag;
-            return Times(div, v);
+            var m = Mag(v);
+            return m == 0 ? new Vector(0, 0, 0) : (1.0 / m) * v;
         }
-        public static Vector Cross(Vector v1, Vector v2)
-        {
-            return new Vector(((v1.Y * v2.Z) - (v1.Z * v2.Y)),
-                              ((v1.Z * v2.X) - (v1.X * v2.Z)),
-                              ((v1.X * v2.Y) - (v1.Y * v2.X)));
-        }
+
+        public static Vector Cross(Vector a, Vector b) => new Vector(
+            a.Y * b.Z - a.Z * b.Y,
+            a.Z * b.X - a.X * b.Z,
+            a.X * b.Y - a.Y * b.X);
     }
 
     public class Color
@@ -278,10 +261,10 @@ namespace RayTracer
 
         public static Camera Create(Vector pos, Vector lookAt)
         {
-            Vector forward = Vector.Norm(Vector.Minus(lookAt, pos));
-            Vector down = new Vector(0, -1, 0);
-            Vector right = Vector.Times(1.5, Vector.Norm(Vector.Cross(forward, down)));
-            Vector up = Vector.Times(1.5, Vector.Norm(Vector.Cross(forward, right)));
+            var forward = Vector.Norm(lookAt - pos);
+            var down = new Vector(0, -1, 0);
+            var right = 1.5 * Vector.Norm(Vector.Cross(forward, down));
+            var up = 1.5 * Vector.Norm(Vector.Cross(forward, right));
 
             return new Camera() { Pos = pos, Forward = forward, Up = up, Right = right };
         }
@@ -307,7 +290,7 @@ namespace RayTracer
 
         public override ISect Intersect(Ray ray)
         {
-            Vector eo = Vector.Minus(Center, ray.Start);
+            var eo = Center - ray.Start;
             double v = Vector.Dot(eo, ray.Dir);
             double dist;
             if (v < 0)
@@ -330,7 +313,7 @@ namespace RayTracer
 
         public override Vector Normal(Vector pos)
         {
-            return Vector.Norm(Vector.Minus(pos, Center));
+            return Vector.Norm(pos - Center);
         }
     }
 
