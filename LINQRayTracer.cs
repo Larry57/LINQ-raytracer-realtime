@@ -1,5 +1,9 @@
 using System.Drawing;
+using System.Drawing.Imaging;
 using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace RayTracer
@@ -74,7 +78,7 @@ namespace RayTracer
 
         internal void Render(Scene scene)
         {
-            for (int y = 0; y < screenHeight; y++)
+            Parallel.For(0, screenHeight, y =>
             {
                 var recenterY = -(y - (screenHeight / 2.0)) / (2.0 * screenHeight);
                 for (int x = 0; x < screenWidth; x++)
@@ -86,7 +90,7 @@ namespace RayTracer
                     var ray = new Ray { Start = scene.Camera.Pos, Dir = point };
                     setPixel(x, y, TraceRay(ray, scene, 0).ToDrawingColor());
                 }
-            }
+            });
         }
 
         internal readonly Scene DefaultScene =
@@ -355,48 +359,71 @@ namespace RayTracer
         public Camera Camera;
     }
 
-    public partial class RayTracerForm : Form
+    public class RayTracerForm : Form
     {
-        Bitmap bitmap;
-        PictureBox pictureBox;
         const int width = 600;
         const int height = 600;
 
+        readonly Bitmap bitmap;
+        readonly PictureBox pictureBox;
+        readonly int[] pixelBuffer;
+        System.Windows.Forms.Timer flushTimer;
+
         public RayTracerForm()
         {
-            bitmap = new Bitmap(width, height);
+            bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+            pixelBuffer = new int[width * height];
 
-            pictureBox = new PictureBox();
-            pictureBox.Dock = DockStyle.Fill;
-            pictureBox.SizeMode = PictureBoxSizeMode.StretchImage;
-            pictureBox.Image = bitmap;
+            pictureBox = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                SizeMode = PictureBoxSizeMode.Normal,
+                Image = bitmap
+            };
 
-            ClientSize = new System.Drawing.Size(width, height + 24);
+            ClientSize = new System.Drawing.Size(width, height);
             Controls.Add(pictureBox);
             Text = "Ray Tracer";
             Load += RayTracerForm_Load;
-
-            Show();
         }
 
-        private void RayTracerForm_Load(object sender, EventArgs e)
+        void RayTracerForm_Load(object sender, EventArgs e)
         {
-            this.Show();
-            RayTracer rayTracer = new RayTracer(width, height, (int x, int y, System.Drawing.Color color) =>
-                                                               {
-                                                                   bitmap.SetPixel(x, y, color);
-                                                                   if (x == 0) pictureBox.Refresh();
-                                                               });
-            rayTracer.Render(rayTracer.DefaultScene);
-            pictureBox.Invalidate();
+            flushTimer = new System.Windows.Forms.Timer { Interval = 100 };
+            flushTimer.Tick += (_, __) => FlushBuffer();
+            flushTimer.Start();
 
+            var sw = Stopwatch.StartNew();
+            Task.Run(() =>
+            {
+                var rt = new RayTracer(width, height, (x, y, color) =>
+                    pixelBuffer[y * width + x] = color.ToArgb());
+                rt.Render(rt.DefaultScene);
+            }).ContinueWith(_ =>
+            {
+                flushTimer.Stop();
+                FlushBuffer();
+                sw.Stop();
+                Text = $"Ray Tracer — {sw.ElapsedMilliseconds} ms ({Environment.ProcessorCount} threads)";
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+
+        void FlushBuffer()
+        {
+            var data = bitmap.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format32bppArgb);
+            Marshal.Copy(pixelBuffer, 0, data.Scan0, pixelBuffer.Length);
+            bitmap.UnlockBits(data);
+            pictureBox.Invalidate();
         }
 
         [STAThread]
         static void Main()
         {
             Application.EnableVisualStyles();
-
+            Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new RayTracerForm());
         }
     }
