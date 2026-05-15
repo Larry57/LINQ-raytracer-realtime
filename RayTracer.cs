@@ -6,13 +6,14 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Vector = System.Numerics.Vector3;
 
 namespace RayTracer
 {
     public class RayTracer
     {
         private const int MaxDepth = 5;
-        private const double ShadowEpsilon = 1e-4;
+        private const float ShadowEpsilon = 1e-4f;
 
         private readonly int screenWidth;
         private readonly int screenHeight;
@@ -39,38 +40,38 @@ namespace RayTracer
             var d = nearest.Ray.Dir;
             var pos = nearest.Dist * d + nearest.Ray.Start;
             var normal = nearest.Thing.Normal(pos);
-            var reflectDir = d - (2 * Vector.Dot(normal, d)) * normal;
+            var reflectDir = d - 2f * Vector.Dot(normal, d) * normal;
 
             var shadowOrigin = pos + ShadowEpsilon * normal;
             var naturalColor = Color.Background;
             foreach (var light in scene.Lights)
             {
                 var ldis = light.Pos - pos;
-                var livec = Vector.Norm(ldis);
+                var livec = Vector.Normalize(ldis);
                 var testRay = new Ray { Start = shadowOrigin, Dir = livec };
 
-                double neatIsect = 0;
+                float neatIsect = 0;
                 foreach (var thing in scene.Things)
                 {
                     var inter = thing.Intersect(testRay);
                     if (inter != null && (neatIsect == 0 || inter.Dist < neatIsect))
                         neatIsect = inter.Dist;
                 }
-                var isInShadow = !((neatIsect > Vector.Mag(ldis)) || (neatIsect == 0));
+                var isInShadow = !((neatIsect > ldis.Length()) || (neatIsect == 0));
                 if (isInShadow) continue;
 
                 var illum = Vector.Dot(livec, normal);
                 var lcolor = illum > 0 ? Color.Times(illum, light.Color) : Color.Make(0, 0, 0);
-                var specular = Vector.Dot(livec, Vector.Norm(reflectDir));
+                var specular = Vector.Dot(livec, Vector.Normalize(reflectDir));
                 var scolor = specular > 0
-                    ? Color.Times(Math.Pow(specular, nearest.Thing.Surface.Roughness), light.Color)
+                    ? Color.Times(MathF.Pow(specular, nearest.Thing.Surface.Roughness), light.Color)
                     : Color.Make(0, 0, 0);
                 naturalColor = Color.Plus(naturalColor,
                     Color.Plus(Color.Times(nearest.Thing.Surface.Diffuse(pos), lcolor),
                                Color.Times(nearest.Thing.Surface.Specular(pos), scolor)));
             }
 
-            var reflectPos = pos + .001 * reflectDir;
+            var reflectPos = pos + .001f * reflectDir;
             var reflectColor = depth >= MaxDepth
                 ? Color.Make(.5, .5, .5)
                 : Color.Times(nearest.Thing.Surface.Reflect(reflectPos),
@@ -81,15 +82,15 @@ namespace RayTracer
 
         internal void Render(Scene scene, CancellationToken cancellationToken = default)
         {
-            var scale = 2.0 * screenHeight;
+            var scale = 2f * screenHeight;
             var options = new ParallelOptions { CancellationToken = cancellationToken };
             Parallel.For(0, screenHeight, options, y =>
             {
-                var recenterY = -(y - (screenHeight / 2.0)) / scale;
+                var recenterY = -(y - (screenHeight / 2f)) / scale;
                 for (int x = 0; x < screenWidth; x++)
                 {
-                    var recenterX = (x - (screenWidth / 2.0)) / scale;
-                    var point = Vector.Norm(scene.Camera.Forward
+                    var recenterX = (x - (screenWidth / 2f)) / scale;
+                    var point = Vector.Normalize(scene.Camera.Forward
                         + recenterX * scene.Camera.Right
                         + recenterY * scene.Camera.Up);
                     var ray = new Ray { Start = scene.Camera.Pos, Dir = point };
@@ -101,40 +102,40 @@ namespace RayTracer
         internal readonly Scene DefaultScene =
             new Scene()
             {
-                Things = new SceneObject[] { 
+                Things = new SceneObject[] {
                                 new Plane() {
-                                    Norm = Vector.Make(0,1,0),
+                                    Norm = new Vector(0, 1, 0),
                                     Offset = 0,
                                     Surface = Surfaces.CheckerBoard
                                 },
                                 new Sphere() {
-                                    Center = Vector.Make(0,1,0),
-                                    Radius = 1,
+                                    Center = new Vector(0, 1, 0),
+                                    Radius = 1f,
                                     Surface = Surfaces.Shiny
                                 },
                                 new Sphere() {
-                                    Center = Vector.Make(-1,.5,1.5),
-                                    Radius = .5,
+                                    Center = new Vector(-1, .5f, 1.5f),
+                                    Radius = .5f,
                                     Surface = Surfaces.Shiny
                                 }},
-                Lights = new Light[] { 
+                Lights = new Light[] {
                                 new Light() {
-                                    Pos = Vector.Make(-2,2.5,0),
-                                    Color = Color.Make(.49,.07,.07)
+                                    Pos = new Vector(-2, 2.5f, 0),
+                                    Color = Color.Make(.49, .07, .07)
                                 },
                                 new Light() {
-                                    Pos = Vector.Make(1.5,2.5,1.5),
-                                    Color = Color.Make(.07,.07,.49)
+                                    Pos = new Vector(1.5f, 2.5f, 1.5f),
+                                    Color = Color.Make(.07, .07, .49)
                                 },
                                 new Light() {
-                                    Pos = Vector.Make(1.5,2.5,-1.5),
-                                    Color = Color.Make(.07,.49,.071)
+                                    Pos = new Vector(1.5f, 2.5f, -1.5f),
+                                    Color = Color.Make(.07, .49, .071)
                                 },
                                 new Light() {
-                                    Pos = Vector.Make(0,3.5,0),
-                                    Color = Color.Make(.21,.21,.35)
+                                    Pos = new Vector(0, 3.5f, 0),
+                                    Color = Color.Make(.21, .21, .35)
                                 }},
-                Camera = Camera.Create(Vector.Make(3, 2, 4), Vector.Make(-1, .5, 0))
+                Camera = Camera.Create(new Vector(3, 2, 4), new Vector(-1, .5f, 0))
             };
     }
 
@@ -144,14 +145,14 @@ namespace RayTracer
         public static readonly Surface CheckerBoard =
             new Surface()
             {
-                Diffuse = pos => ((Math.Floor(pos.Z) + Math.Floor(pos.X)) % 2 != 0)
+                Diffuse = pos => ((MathF.Floor(pos.Z) + MathF.Floor(pos.X)) % 2 != 0)
                                     ? Color.Make(1, 1, 1)
                                     : Color.Make(0, 0, 0),
                 Specular = pos => Color.Make(1, 1, 1),
-                Reflect = pos => ((Math.Floor(pos.Z) + Math.Floor(pos.X)) % 2 != 0)
-                                    ? .1
-                                    : .7,
-                Roughness = 150
+                Reflect = pos => ((MathF.Floor(pos.Z) + MathF.Floor(pos.X)) % 2 != 0)
+                                    ? .1f
+                                    : .7f,
+                Roughness = 150f
             };
 
 
@@ -160,32 +161,9 @@ namespace RayTracer
             {
                 Diffuse = pos => Color.Make(1, 1, 1),
                 Specular = pos => Color.Make(.5, .5, .5),
-                Reflect = pos => .6,
-                Roughness = 50
+                Reflect = pos => .6f,
+                Roughness = 50f
             };
-    }
-
-    internal readonly record struct Vector(double X, double Y, double Z)
-    {
-        public static Vector Make(double x, double y, double z) => new Vector(x, y, z);
-
-        public static Vector operator +(Vector a, Vector b) => new Vector(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
-        public static Vector operator -(Vector a, Vector b) => new Vector(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
-        public static Vector operator *(double n, Vector v) => new Vector(v.X * n, v.Y * n, v.Z * n);
-
-        public static double Dot(Vector a, Vector b) => a.X * b.X + a.Y * b.Y + a.Z * b.Z;
-        public static double Mag(Vector v) => Math.Sqrt(Dot(v, v));
-
-        public static Vector Norm(Vector v)
-        {
-            var m = Mag(v);
-            return m == 0 ? new Vector(0, 0, 0) : (1.0 / m) * v;
-        }
-
-        public static Vector Cross(Vector a, Vector b) => new Vector(
-            a.Y * b.Z - a.Z * b.Y,
-            a.Z * b.X - a.X * b.Z,
-            a.X * b.Y - a.Y * b.X);
     }
 
     public class Color
@@ -241,15 +219,15 @@ namespace RayTracer
     {
         public SceneObject Thing;
         public Ray Ray;
-        public double Dist;
+        public float Dist;
     }
 
     class Surface
     {
         public Func<Vector, Color> Diffuse;
         public Func<Vector, Color> Specular;
-        public Func<Vector, double> Reflect;
-        public double Roughness;
+        public Func<Vector, float> Reflect;
+        public float Roughness;
     }
 
     class Camera
@@ -261,10 +239,10 @@ namespace RayTracer
 
         public static Camera Create(Vector pos, Vector lookAt)
         {
-            var forward = Vector.Norm(lookAt - pos);
+            var forward = Vector.Normalize(lookAt - pos);
             var down = new Vector(0, -1, 0);
-            var right = 1.5 * Vector.Norm(Vector.Cross(forward, down));
-            var up = 1.5 * Vector.Norm(Vector.Cross(forward, right));
+            var right = 1.5f * Vector.Normalize(Vector.Cross(forward, down));
+            var up = 1.5f * Vector.Normalize(Vector.Cross(forward, right));
 
             return new Camera() { Pos = pos, Forward = forward, Up = up, Right = right };
         }
@@ -286,21 +264,21 @@ namespace RayTracer
     class Sphere : SceneObject
     {
         public Vector Center;
-        public double Radius;
+        public float Radius;
 
         public override ISect Intersect(Ray ray)
         {
             var eo = Center - ray.Start;
-            double v = Vector.Dot(eo, ray.Dir);
-            double dist;
+            var v = Vector.Dot(eo, ray.Dir);
+            float dist;
             if (v < 0)
             {
                 dist = 0;
             }
             else
             {
-                double disc = Math.Pow(Radius, 2) - (Vector.Dot(eo, eo) - Math.Pow(v, 2));
-                dist = disc < 0 ? 0 : v - Math.Sqrt(disc);
+                var disc = Radius * Radius - (Vector.Dot(eo, eo) - v * v);
+                dist = disc < 0 ? 0 : v - MathF.Sqrt(disc);
             }
             if (dist == 0) return null;
             return new ISect()
@@ -313,18 +291,18 @@ namespace RayTracer
 
         public override Vector Normal(Vector pos)
         {
-            return Vector.Norm(pos - Center);
+            return Vector.Normalize(pos - Center);
         }
     }
 
     class Plane : SceneObject
     {
         public Vector Norm;
-        public double Offset;
+        public float Offset;
 
         public override ISect Intersect(Ray ray)
         {
-            double denom = Vector.Dot(Norm, ray.Dir);
+            var denom = Vector.Dot(Norm, ray.Dir);
             if (denom > 0) return null;
             return new ISect()
                    {
