@@ -2,6 +2,8 @@
 
 A small ray tracer in C# / .NET 10 / Windows Forms, turned into a **real-time, interactive** viewer: orbit the scene with the mouse, zoom, pan, and watch the little sphere bounce continuously.
 
+![Real-time orbit, pan, zoom and continuous bounce](raytracer-realtime.gif)
+
 ## Where this project comes from
 
 It all started from the brilliant [LINQ-raytracer by Luke Hoban](https://github.com/lukehoban/LINQ-raytracer), a ray tracer written as a single LINQ query. That demo **blew my mind for years**: seeing an entire 3D scene emerge from a `from … where … select` is one of those things that durably changes how you look at a language.
