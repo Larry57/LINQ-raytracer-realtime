@@ -160,47 +160,28 @@ namespace RayTracer
             };
     }
 
-    public class Color
+    public readonly record struct Color
     {
-        public readonly double R;
-        public readonly double G;
-        public readonly double B;
+        public readonly float R;
+        public readonly float G;
+        public readonly float B;
 
-        public Color(double r, double g, double b) { R = r; G = g; B = b; }
+        public Color(float r, float g, float b) { R = r; G = g; B = b; }
 
-        public static Color Make(double r, double g, double b) { return new Color(r, g, b); }
+        // Authoring overload: accepts double literals (.49, .07, …) and stores as float.
+        public static Color Make(double r, double g, double b) => new Color((float)r, (float)g, (float)b);
 
-        public static Color Times(double n, Color v)
-        {
-            return new Color(n * v.R, n * v.G, n * v.B);
-        }
-        public static Color Times(Color v1, Color v2)
-        {
-            return new Color(v1.R * v2.R, v1.G * v2.G, v1.B * v2.B);
-        }
+        public static Color Times(float n, Color v) => new Color(n * v.R, n * v.G, n * v.B);
+        public static Color Times(Color v1, Color v2) => new Color(v1.R * v2.R, v1.G * v2.G, v1.B * v2.B);
 
-        public static Color Plus(Color v1, Color v2)
-        {
-            return new Color(v1.R + v2.R, v1.G + v2.G, v1.B + v2.B);
-        }
-        public static Color Minus(Color v1, Color v2)
-        {
-            return new Color(v1.R - v2.R, v1.G - v2.G, v1.B - v2.B);
-        }
+        public static Color Plus(Color v1, Color v2) => new Color(v1.R + v2.R, v1.G + v2.G, v1.B + v2.B);
 
         public static readonly Color Background = Make(0, 0, 0);
-        public static readonly Color DefaultColor = Make(0, 0, 0);
 
-        private static double Legalize(double d)
-        {
-            return d > 1 ? 1 : d < 0 ? 0 : d;
-        }
+        private static float Legalize(float d) => d > 1 ? 1 : d < 0 ? 0 : d;
 
         public System.Drawing.Color ToDrawingColor()
-        {
-            return System.Drawing.Color.FromArgb((int)(Legalize(R) * 255), (int)(Legalize(G) * 255), (int)(Legalize(B) * 255));
-        }
-
+            => System.Drawing.Color.FromArgb((int)(Legalize(R) * 255), (int)(Legalize(G) * 255), (int)(Legalize(B) * 255));
     }
 
     class Ray
