@@ -502,7 +502,9 @@ namespace RayTracer
                 {
                     FlushBuffer();
                     sw.Stop();
-                    Text = $"Ray Tracer — {w}×{h} — {sw.ElapsedMilliseconds} ms";
+                    var seconds = sw.Elapsed.TotalSeconds;
+                    var fps = seconds > 0 ? 1.0 / seconds : 0;
+                    Text = $"Ray Tracer — {w}×{h} — {fps:F1} fps";
                 }
                 rendering = false;
                 if (pendingRender) StartRender();
