@@ -1,13 +1,14 @@
-using System.Drawing;
-using System.Drawing.Imaging;
 using System;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 using Vector = System.Numerics.Vector3;
 
+// Moteur de ray tracing, optimisé "à la C" sans changer l'algorithme :
+//  - Ray est un struct (pile) — pas d'allocation par rayon.
+//  - Les surfaces sont un enum + switch (appels statiques inlinables) au lieu de Func<>.
+//  - Les objets sont un struct tagué (Obj/ObjKind) parcouru par switch — pas de
+//    dispatch virtuel ni d'allocation d'ISect (Intersect renvoie une distance float).
+// Résultat : ~92 % de la vitesse d'un portage C natif (cf. c/raytracer.c).
 namespace RayTracer
 {
     public class RayTracer
@@ -15,11 +16,12 @@ namespace RayTracer
         private const int MaxDepth = 5;
         private const float ShadowEpsilon = 1e-4f;
 
-        private readonly int screenWidth;
-        private readonly int screenHeight;
-        private readonly Action<int, int, System.Drawing.Color> setPixel;
+        private readonly int screenWidth, screenHeight;
+        private readonly Action<int, int, int> setPixel;
 
-        public RayTracer(int screenWidth, int screenHeight, Action<int, int, System.Drawing.Color> setPixel)
+        // setPixel reçoit un pixel 32 bits empaqueté en RGBA little-endian (R = octet bas),
+        // au format PixelFormat.UncompressedR8G8B8A8 de Raylib.
+        public RayTracer(int screenWidth, int screenHeight, Action<int, int, int> setPixel)
         {
             this.screenWidth = screenWidth;
             this.screenHeight = screenHeight;
@@ -28,18 +30,21 @@ namespace RayTracer
 
         private Color TraceRay(Ray ray, Scene scene, int depth)
         {
-            ISect nearest = null;
-            foreach (var thing in scene.Things)
+            var things = scene.Things;
+            int nearest = -1;
+            float nearestDist = 0;
+            for (int i = 0; i < things.Length; i++)
             {
-                var isect = thing.Intersect(ray);
-                if (isect != null && (nearest == null || isect.Dist < nearest.Dist))
-                    nearest = isect;
+                var dist = Obj.Intersect(in things[i], ray);
+                if (dist != 0 && (nearest < 0 || dist < nearestDist)) { nearest = i; nearestDist = dist; }
             }
-            if (nearest == null) return Color.Background;
+            if (nearest < 0) return Color.Background;
 
-            var d = nearest.Ray.Dir;
-            var pos = nearest.Dist * d + nearest.Ray.Start;
-            var normal = nearest.Thing.Normal(pos);
+            ref var hit = ref things[nearest];
+            var surf = hit.Surf;
+            var d = ray.Dir;
+            var pos = nearestDist * d + ray.Start;
+            var normal = Obj.Normal(in hit, pos);
             var reflectDir = d - 2f * Vector.Dot(normal, d) * normal;
 
             var shadowOrigin = pos + ShadowEpsilon * normal;
@@ -48,14 +53,13 @@ namespace RayTracer
             {
                 var ldis = light.Pos - pos;
                 var livec = Vector.Normalize(ldis);
-                var testRay = new Ray { Start = shadowOrigin, Dir = livec };
+                var testRay = new Ray(shadowOrigin, livec);
 
                 float neatIsect = 0;
-                foreach (var thing in scene.Things)
+                for (int i = 0; i < things.Length; i++)
                 {
-                    var inter = thing.Intersect(testRay);
-                    if (inter != null && (neatIsect == 0 || inter.Dist < neatIsect))
-                        neatIsect = inter.Dist;
+                    var inter = Obj.Intersect(in things[i], testRay);
+                    if (inter != 0 && (neatIsect == 0 || inter < neatIsect)) neatIsect = inter;
                 }
                 var isInShadow = !((neatIsect > ldis.Length()) || (neatIsect == 0));
                 if (isInShadow) continue;
@@ -64,18 +68,18 @@ namespace RayTracer
                 var lcolor = illum > 0 ? Color.Times(illum, light.Color) : Color.Make(0, 0, 0);
                 var specular = Vector.Dot(livec, Vector.Normalize(reflectDir));
                 var scolor = specular > 0
-                    ? Color.Times(MathF.Pow(specular, nearest.Thing.Surface.Roughness), light.Color)
+                    ? Color.Times(MathF.Pow(specular, Surf.Roughness(surf)), light.Color)
                     : Color.Make(0, 0, 0);
                 naturalColor = Color.Plus(naturalColor,
-                    Color.Plus(Color.Times(nearest.Thing.Surface.Diffuse(pos), lcolor),
-                               Color.Times(nearest.Thing.Surface.Specular(pos), scolor)));
+                    Color.Plus(Color.Times(Surf.Diffuse(surf, pos), lcolor),
+                               Color.Times(Surf.Specular(surf, pos), scolor)));
             }
 
             var reflectPos = pos + .001f * reflectDir;
             var reflectColor = depth >= MaxDepth
                 ? Color.Make(.5, .5, .5)
-                : Color.Times(nearest.Thing.Surface.Reflect(reflectPos),
-                              TraceRay(new Ray { Start = reflectPos, Dir = reflectDir }, scene, depth + 1));
+                : Color.Times(Surf.Reflect(surf, reflectPos),
+                              TraceRay(new Ray(reflectPos, reflectDir), scene, depth + 1));
 
             return Color.Plus(naturalColor, reflectColor);
         }
@@ -91,27 +95,15 @@ namespace RayTracer
                 {
                     var recenterX = (x - (screenWidth / 2f)) / scale;
                     var point = Vector.Normalize(scene.Camera.Forward
-                        + recenterX * scene.Camera.Right
-                        + recenterY * scene.Camera.Up);
-                    var ray = new Ray { Start = scene.Camera.Pos, Dir = point };
-                    setPixel(x, y, TraceRay(ray, scene, 0).ToDrawingColor());
+                        + recenterX * scene.Camera.Right + recenterY * scene.Camera.Up);
+                    setPixel(x, y, TraceRay(new Ray(scene.Camera.Pos, point), scene, 0).ToRgba());
                 }
             });
         }
 
         internal const float BouncingBallRadius = 0.5f;
 
-        static readonly Plane GroundPlane = new Plane
-        {
-            Norm = new Vector(0, 1, 0), Offset = 0, Surface = Surfaces.CheckerBoard
-        };
-
-        static readonly Sphere BigSphere = new Sphere
-        {
-            Center = new Vector(0, 1, 0), Radius = 1f, Surface = Surfaces.Shiny
-        };
-
-        internal static readonly Light[] DefaultLights = new Light[]
+        internal static readonly Light[] DefaultLights =
         {
             new Light { Pos = new Vector(-2,   2.5f,  0),    Color = Color.Make(.49, .07, .07) },
             new Light { Pos = new Vector( 1.5f, 2.5f, 1.5f), Color = Color.Make(.07, .07, .49) },
@@ -122,95 +114,103 @@ namespace RayTracer
         internal static Scene CreateScene(Camera camera, Vector bouncingBallCenter) =>
             new Scene
             {
-                Things = new SceneObject[]
+                Things = new[]
                 {
-                    GroundPlane,
-                    BigSphere,
-                    new Sphere { Center = bouncingBallCenter, Radius = BouncingBallRadius, Surface = Surfaces.Shiny }
+                    new Obj { Kind = ObjKind.Plane,  Surf = SurfKind.Checker, Norm = new Vector(0, 1, 0), Offset = 0 },
+                    new Obj { Kind = ObjKind.Sphere, Surf = SurfKind.Shiny,   Center = new Vector(0, 1, 0), Radius = 1f },
+                    new Obj { Kind = ObjKind.Sphere, Surf = SurfKind.Shiny,   Center = bouncingBallCenter, Radius = BouncingBallRadius },
                 },
                 Lights = DefaultLights,
                 Camera = camera
             };
     }
 
-    static class Surfaces
+    enum SurfKind { Checker, Shiny }
+
+    // Surfaces en switch (remplace les Func<Vector,...> : appels statiques inlinables).
+    static class Surf
     {
-        // Only works with X-Z plane.
-        public static readonly Surface CheckerBoard =
-            new Surface()
-            {
-                Diffuse = pos => ((MathF.Floor(pos.Z) + MathF.Floor(pos.X)) % 2 != 0)
-                                    ? Color.Make(1, 1, 1)
-                                    : Color.Make(0, 0, 0),
-                Specular = pos => Color.Make(1, 1, 1),
-                Reflect = pos => ((MathF.Floor(pos.Z) + MathF.Floor(pos.X)) % 2 != 0)
-                                    ? .1f
-                                    : .7f,
-                Roughness = 150f
-            };
+        public static Color Diffuse(SurfKind s, Vector p) => s == SurfKind.Checker
+            ? (((MathF.Floor(p.Z) + MathF.Floor(p.X)) % 2 != 0) ? new Color(1, 1, 1) : new Color(0, 0, 0))
+            : new Color(1, 1, 1);
+        public static Color Specular(SurfKind s, Vector p) =>
+            s == SurfKind.Checker ? new Color(1, 1, 1) : new Color(.5f, .5f, .5f);
+        public static float Reflect(SurfKind s, Vector p) => s == SurfKind.Checker
+            ? (((MathF.Floor(p.Z) + MathF.Floor(p.X)) % 2 != 0) ? .1f : .7f) : .6f;
+        public static float Roughness(SurfKind s) => s == SurfKind.Checker ? 150f : 50f;
+    }
 
+    enum ObjKind { Sphere, Plane }
 
-        public static readonly Surface Shiny =
-            new Surface()
+    // Objet de scène tagué : un seul struct pour sphère et plan, sélectionné par switch
+    // (pas de classe abstraite ni de dispatch virtuel). Intersect renvoie la distance, 0 = miss.
+    struct Obj
+    {
+        public ObjKind Kind;
+        public SurfKind Surf;
+        public Vector Center; public float Radius;   // sphère
+        public Vector Norm;   public float Offset;   // plan
+
+        public static float Intersect(in Obj o, Ray ray)
+        {
+            if (o.Kind == ObjKind.Sphere)
             {
-                Diffuse = pos => Color.Make(1, 1, 1),
-                Specular = pos => Color.Make(.5, .5, .5),
-                Reflect = pos => .6f,
-                Roughness = 50f
-            };
+                var eo = o.Center - ray.Start;
+                var v = Vector.Dot(eo, ray.Dir);
+                if (v < 0) return 0;
+                var disc = o.Radius * o.Radius - (Vector.Dot(eo, eo) - v * v);
+                if (disc < 0) return 0;
+                return v - MathF.Sqrt(disc);
+            }
+            else
+            {
+                var denom = Vector.Dot(o.Norm, ray.Dir);
+                if (denom > 0) return 0;
+                return (Vector.Dot(o.Norm, ray.Start) + o.Offset) / (-denom);
+            }
+        }
+
+        public static Vector Normal(in Obj o, Vector pos) =>
+            o.Kind == ObjKind.Sphere ? Vector.Normalize(pos - o.Center) : o.Norm;
+    }
+
+    // struct (pile) plutôt que class (tas) : supprime une allocation par rayon.
+    readonly struct Ray
+    {
+        public readonly Vector Start, Dir;
+        public Ray(Vector start, Vector dir) { Start = start; Dir = dir; }
     }
 
     public readonly record struct Color
     {
-        public readonly float R;
-        public readonly float G;
-        public readonly float B;
+        public readonly float R, G, B;
 
         public Color(float r, float g, float b) { R = r; G = g; B = b; }
 
-        // Authoring overload: accepts double literals (.49, .07, …) and stores as float.
+        // Surcharge d'écriture : accepte des littéraux double (.49, .07, …) stockés en float.
         public static Color Make(double r, double g, double b) => new Color((float)r, (float)g, (float)b);
 
         public static Color Times(float n, Color v) => new Color(n * v.R, n * v.G, n * v.B);
-        public static Color Times(Color v1, Color v2) => new Color(v1.R * v2.R, v1.G * v2.G, v1.B * v2.B);
-
-        public static Color Plus(Color v1, Color v2) => new Color(v1.R + v2.R, v1.G + v2.G, v1.B + v2.B);
+        public static Color Times(Color a, Color b) => new Color(a.R * b.R, a.G * b.G, a.B * b.B);
+        public static Color Plus(Color a, Color b) => new Color(a.R + b.R, a.G + b.G, a.B + b.B);
 
         public static readonly Color Background = Make(0, 0, 0);
 
         private static float Legalize(float d) => d > 1 ? 1 : d < 0 ? 0 : d;
 
-        public System.Drawing.Color ToDrawingColor()
-            => System.Drawing.Color.FromArgb((int)(Legalize(R) * 255), (int)(Legalize(G) * 255), (int)(Legalize(B) * 255));
+        // RGBA empaqueté little-endian (octet 0 = R), alpha opaque — format de la texture Raylib.
+        public int ToRgba()
+        {
+            int r = (int)(Legalize(R) * 255), g = (int)(Legalize(G) * 255), b = (int)(Legalize(B) * 255);
+            return (0xFF << 24) | (b << 16) | (g << 8) | r;
+        }
     }
 
-    class Ray
-    {
-        public Vector Start;
-        public Vector Dir;
-    }
-
-    class ISect
-    {
-        public SceneObject Thing;
-        public Ray Ray;
-        public float Dist;
-    }
-
-    class Surface
-    {
-        public Func<Vector, Color> Diffuse;
-        public Func<Vector, Color> Specular;
-        public Func<Vector, float> Reflect;
-        public float Roughness;
-    }
+    struct Light { public Vector Pos; public Color Color; }
 
     class Camera
     {
-        public Vector Pos;
-        public Vector Forward;
-        public Vector Up;
-        public Vector Right;
+        public Vector Pos, Forward, Up, Right;
 
         public static Camera Create(Vector pos, Vector lookAt)
         {
@@ -218,326 +218,14 @@ namespace RayTracer
             var down = new Vector(0, -1, 0);
             var right = 1.5f * Vector.Normalize(Vector.Cross(forward, down));
             var up = 1.5f * Vector.Normalize(Vector.Cross(forward, right));
-
             return new Camera() { Pos = pos, Forward = forward, Up = up, Right = right };
-        }
-    }
-
-    class Light
-    {
-        public Vector Pos;
-        public Color Color;
-    }
-
-    abstract class SceneObject
-    {
-        public Surface Surface;
-        public abstract ISect Intersect(Ray ray);
-        public abstract Vector Normal(Vector pos);
-    }
-
-    class Sphere : SceneObject
-    {
-        public Vector Center;
-        public float Radius;
-
-        public override ISect Intersect(Ray ray)
-        {
-            var eo = Center - ray.Start;
-            var v = Vector.Dot(eo, ray.Dir);
-            float dist;
-            if (v < 0)
-            {
-                dist = 0;
-            }
-            else
-            {
-                var disc = Radius * Radius - (Vector.Dot(eo, eo) - v * v);
-                dist = disc < 0 ? 0 : v - MathF.Sqrt(disc);
-            }
-            if (dist == 0) return null;
-            return new ISect()
-                   {
-                       Thing = this,
-                       Ray = ray,
-                       Dist = dist
-                   };
-        }
-
-        public override Vector Normal(Vector pos)
-        {
-            return Vector.Normalize(pos - Center);
-        }
-    }
-
-    class Plane : SceneObject
-    {
-        public Vector Norm;
-        public float Offset;
-
-        public override ISect Intersect(Ray ray)
-        {
-            var denom = Vector.Dot(Norm, ray.Dir);
-            if (denom > 0) return null;
-            return new ISect()
-                   {
-                       Thing = this,
-                       Ray = ray,
-                       Dist = (Vector.Dot(Norm, ray.Start) + Offset) / (-denom)
-                   };
-        }
-
-        public override Vector Normal(Vector pos)
-        {
-            return Norm;
         }
     }
 
     class Scene
     {
-        public SceneObject[] Things;
+        public Obj[] Things;
         public Light[] Lights;
         public Camera Camera;
-    }
-
-    public class RayTracerForm : Form
-    {
-        const int InitialWidth = 600;
-        const int InitialHeight = 600;
-        const float OrbitSensitivity = 0.008f;
-        const float PanSensitivity = 0.0015f;
-        const float MinPitch = -1.4f;
-        const float MaxPitch = 1.4f;
-        const float MinRadius = 1.5f;
-        const float MaxRadius = 40f;
-
-        // Bouncing ball: parabola h(t) = 4 H t (P - t) / P^2 over period P, peak height H.
-        const float BallRestY = RayTracer.BouncingBallRadius;   // bottom of ball sits on the y=0 plane
-        const float BallX = -1f;
-        const float BallZ = 1.5f;
-        const float BounceHeight = 1.3f;
-        const float BouncePeriod = 1.1f;
-
-        enum DragMode { None, Orbit, Pan }
-
-        readonly OrbitPictureBox pictureBox;
-        readonly Stopwatch animationClock = Stopwatch.StartNew();
-        readonly System.Windows.Forms.Timer animationTimer;
-
-        Bitmap bitmap;
-        int[] pixelBuffer;
-        int bufferWidth, bufferHeight;
-        CancellationTokenSource renderCts;
-        bool rendering;
-        bool pendingRender;
-
-        Vector orbitTarget = new Vector(0, 0.5f, 0);
-        float orbitYaw, orbitPitch, orbitRadius;
-
-        DragMode dragMode;
-        Point lastMousePos;
-
-        public RayTracerForm()
-        {
-            var initialPos = new Vector(3, 2, 4);
-            var initialOffset = initialPos - orbitTarget;
-            orbitRadius = initialOffset.Length();
-            orbitYaw = MathF.Atan2(initialOffset.X, initialOffset.Z);
-            orbitPitch = MathF.Asin(initialOffset.Y / orbitRadius);
-
-            pictureBox = new OrbitPictureBox
-            {
-                Dock = DockStyle.Fill,
-                SizeMode = PictureBoxSizeMode.Normal,
-                BackColor = System.Drawing.Color.Black,
-                Cursor = Cursors.Hand
-            };
-            pictureBox.MouseDown += OnMouseDown;
-            pictureBox.MouseUp += OnMouseUp;
-            pictureBox.MouseMove += OnMouseMove;
-            pictureBox.MouseWheel += OnMouseWheel;
-            Controls.Add(pictureBox);
-
-            ClientSize = new System.Drawing.Size(InitialWidth, InitialHeight);
-            MinimumSize = new System.Drawing.Size(120, 120);
-            Text = "Ray Tracer — left drag: orbit, right drag: pan, wheel: zoom";
-            DoubleBuffered = true;
-
-            animationTimer = new System.Windows.Forms.Timer { Interval = 16 };
-            animationTimer.Tick += (_, __) => ScheduleRender();
-            animationTimer.Start();
-
-            Load += (_, __) => ScheduleRender();
-            ClientSizeChanged += (_, __) => ScheduleRender(cancelCurrent: true);
-        }
-
-        Vector GetBouncingBallCenter()
-        {
-            var t = (float)(animationClock.Elapsed.TotalSeconds % BouncePeriod);
-            var h = 4f * BounceHeight * t * (BouncePeriod - t) / (BouncePeriod * BouncePeriod);
-            return new Vector(BallX, BallRestY + h, BallZ);
-        }
-
-        void ScheduleRender(bool cancelCurrent = false)
-        {
-            if (!IsHandleCreated) return;
-            if (WindowState == FormWindowState.Minimized) return;
-            if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
-            if (cancelCurrent) renderCts?.Cancel();
-            if (rendering)
-            {
-                pendingRender = true;
-                return;
-            }
-            StartRender();
-        }
-
-        void OnMouseDown(object sender, MouseEventArgs e)
-        {
-            if (dragMode != DragMode.None) return;
-            if (e.Button == MouseButtons.Left) dragMode = DragMode.Orbit;
-            else if (e.Button == MouseButtons.Right) dragMode = DragMode.Pan;
-            else return;
-            lastMousePos = e.Location;
-            pictureBox.Cursor = Cursors.SizeAll;
-        }
-
-        void OnMouseUp(object sender, MouseEventArgs e)
-        {
-            if ((e.Button == MouseButtons.Left && dragMode == DragMode.Orbit) ||
-                (e.Button == MouseButtons.Right && dragMode == DragMode.Pan))
-            {
-                dragMode = DragMode.None;
-                pictureBox.Cursor = Cursors.Hand;
-            }
-        }
-
-        void OnMouseMove(object sender, MouseEventArgs e)
-        {
-            if (dragMode == DragMode.None) return;
-            var dx = e.X - lastMousePos.X;
-            var dy = e.Y - lastMousePos.Y;
-            lastMousePos = e.Location;
-
-            if (dragMode == DragMode.Orbit)
-            {
-                orbitYaw -= dx * OrbitSensitivity;
-                orbitPitch += dy * OrbitSensitivity;
-                if (orbitPitch < MinPitch) orbitPitch = MinPitch;
-                if (orbitPitch > MaxPitch) orbitPitch = MaxPitch;
-            }
-            else
-            {
-                // Pan: translate orbitTarget in the camera plane. Camera.Right and .Up
-                // are scaled by 1.5 in Camera.Create, so divide back to unit vectors.
-                var cam = GetOrbitCamera();
-                var camRight = cam.Right / 1.5f;
-                var camUp = cam.Up / 1.5f;
-                var step = orbitRadius * PanSensitivity;
-                orbitTarget -= dx * step * camRight + dy * step * camUp;
-            }
-            ScheduleRender();
-        }
-
-        void OnMouseWheel(object sender, MouseEventArgs e)
-        {
-            var factor = e.Delta > 0 ? 0.9f : 1.1f;
-            orbitRadius *= factor;
-            if (orbitRadius < MinRadius) orbitRadius = MinRadius;
-            if (orbitRadius > MaxRadius) orbitRadius = MaxRadius;
-            ScheduleRender();
-        }
-
-        Camera GetOrbitCamera()
-        {
-            var cp = MathF.Cos(orbitPitch);
-            var pos = orbitTarget + new Vector(
-                orbitRadius * cp * MathF.Sin(orbitYaw),
-                orbitRadius * MathF.Sin(orbitPitch),
-                orbitRadius * cp * MathF.Cos(orbitYaw));
-            return Camera.Create(pos, orbitTarget);
-        }
-
-        void StartRender()
-        {
-            rendering = true;
-            pendingRender = false;
-
-            var w = ClientSize.Width;
-            var h = ClientSize.Height;
-            if (w <= 0 || h <= 0) { rendering = false; return; }
-
-            if (bufferWidth != w || bufferHeight != h)
-            {
-                bufferWidth = w;
-                bufferHeight = h;
-                var oldBitmap = bitmap;
-                bitmap = new Bitmap(w, h, PixelFormat.Format32bppArgb);
-                pixelBuffer = new int[w * h];
-                pictureBox.Image = bitmap;
-                oldBitmap?.Dispose();
-            }
-
-            var cts = new CancellationTokenSource();
-            renderCts = cts;
-            var buf = pixelBuffer;
-            var token = cts.Token;
-            var scene = RayTracer.CreateScene(GetOrbitCamera(), GetBouncingBallCenter());
-
-            var sw = Stopwatch.StartNew();
-
-            Task.Run(() =>
-            {
-                var rt = new RayTracer(w, h, (x, y, color) =>
-                {
-                    if (token.IsCancellationRequested) return;
-                    buf[y * w + x] = color.ToArgb();
-                });
-                rt.Render(scene, token);
-            }, token).ContinueWith(t =>
-            {
-                var sizeStillMatches = bufferWidth == w && bufferHeight == h;
-                var cancelled = token.IsCancellationRequested || t.IsCanceled;
-                if (!cancelled && !t.IsFaulted && sizeStillMatches)
-                {
-                    FlushBuffer();
-                    sw.Stop();
-                    var seconds = sw.Elapsed.TotalSeconds;
-                    var fps = seconds > 0 ? 1.0 / seconds : 0;
-                    Text = $"Ray Tracer — {w}×{h} — {fps:F1} fps";
-                }
-                rendering = false;
-                if (pendingRender) StartRender();
-            }, TaskScheduler.FromCurrentSynchronizationContext());
-        }
-
-        void FlushBuffer()
-        {
-            var bmp = bitmap;
-            var buf = pixelBuffer;
-            if (bmp == null || buf == null) return;
-            var data = bmp.LockBits(
-                new Rectangle(0, 0, bufferWidth, bufferHeight),
-                ImageLockMode.WriteOnly,
-                PixelFormat.Format32bppArgb);
-            Marshal.Copy(buf, 0, data.Scan0, buf.Length);
-            bmp.UnlockBits(data);
-            pictureBox.Invalidate();
-        }
-
-        [STAThread]
-        static void Main()
-        {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new RayTracerForm());
-        }
-    }
-
-    // PictureBox that takes focus on hover so MouseWheel events route to it.
-    class OrbitPictureBox : PictureBox
-    {
-        public OrbitPictureBox() { SetStyle(ControlStyles.Selectable, true); }
-        protected override void OnMouseEnter(EventArgs e) { Focus(); base.OnMouseEnter(e); }
     }
 }

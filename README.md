@@ -1,6 +1,6 @@
 # RayTracer real-time, interactive
 
-A small ray tracer in C# / .NET 10 / Windows Forms, turned into a **real-time, interactive** viewer: orbit the scene with the mouse, zoom, pan, and watch the little sphere bounce continuously.
+A small ray tracer in C# / .NET 10, turned into a **real-time, interactive** viewer: orbit the scene with the mouse, zoom, pan, and watch the little sphere bounce continuously. Cross-platform (Linux / Windows / macOS) thanks to [Raylib-cs](https://github.com/raylib-cs/raylib-cs) for the window and framebuffer.
 
 ![Real-time orbit, pan, zoom and continuous bounce](raytracer-realtime.gif)
 
@@ -18,17 +18,17 @@ The main building blocks:
 
 - **Interactive orbit camera** - left-click-drag to rotate around the scene, wheel to zoom.
 - **Camera pan** - right-click-drag to slide the point of interest.
-- **Render pipeline scheduling** - at most 1 render in flight + 1 pending, and atomic framebuffer flush (no more bands while moving).
-- **Geometry on `System.Numerics.Vector3`** - SIMD throughout the geometry pipeline.
+- **Cross-platform host** - the framebuffer is uploaded to a GPU texture each frame via Raylib-cs; `Parallel.For` ray-traces the rows.
+- **Allocation-free engine** - rays are structs, scene objects a tagged struct switched on (no per-ray heap churn), `System.Numerics.Vector3` SIMD throughout.
 - **Continuous animation** - the small sphere bounces in a loop, independently of user input.
 
 ## Running it
 
-```powershell
+```sh
 dotnet run -c Release
 ```
 
-Requirements: .NET 10 SDK, Windows (the project uses Windows Forms for the window and `System.Drawing` for the framebuffer).
+Requirements: .NET 10 SDK. The window and framebuffer go through Raylib-cs, which ships the native binaries via NuGet, so it runs on Linux, Windows and macOS out of the box (on Linux a desktop OpenGL stack — `libGL`, X11/Wayland — is enough).
 
 ## Controls
 
