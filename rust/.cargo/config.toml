@@ -1,0 +1,3 @@
+# Équivalent du -march=native côté C, pour une comparaison juste.
+[build]
+rustflags = ["-C", "target-cpu=native"]

@@ -16,6 +16,12 @@ obj/
 ## Claude Code
 .claude/
 
+## Native / Rust build artifacts
+/c/raytracer
+/c/viewer
+/c/gpu
+/rust/target/
+
 ## OS
 Thumbs.db
 .DS_Store

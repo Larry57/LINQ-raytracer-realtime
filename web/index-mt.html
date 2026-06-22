@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ray Tracer — JS multi-thread (Web Workers)</title>
+<style>
+  html, body { margin: 0; background: #111; color: #ddd; font: 14px/1.4 system-ui, sans-serif; }
+  .wrap { display: flex; gap: 16px; padding: 16px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { background: #000; image-rendering: pixelated; cursor: grab; border: 1px solid #333; }
+  canvas:active { cursor: grabbing; }
+  .panel { min-width: 240px; }
+  .stat { font-variant-numeric: tabular-nums; }
+  .stat b { color: #fff; font-size: 22px; }
+  label { display: block; margin: 10px 0 4px; color: #9ab; }
+  select { background: #222; color: #ddd; border: 1px solid #444; padding: 4px; }
+  .hint { color: #889; margin-top: 14px; }
+  .err { color: #f88; margin-top: 14px; }
+  code { color: #cda; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="view"></canvas>
+  <div class="panel">
+    <h2>Ray Tracer — JS multi-thread</h2>
+    <div class="stat"><b id="fps">—</b> fps</div>
+    <div class="stat"><span id="ms">—</span> ms / frame &nbsp;·&nbsp; <span id="res">—</span></div>
+    <label for="ressel">Résolution de rendu</label>
+    <select id="ressel">
+      <option value="300" selected>300 × 300</option>
+      <option value="450">450 × 450</option>
+      <option value="600">600 × 600</option>
+      <option value="800">800 × 800</option>
+    </select>
+    <label for="wsel">Workers (threads)</label>
+    <select id="wsel"></select>
+    <div class="hint">
+      Clic gauche : orbiter · Clic droit : pan · Molette : zoom
+    </div>
+    <div id="warn" class="err" hidden></div>
+  </div>
+</div>
+<script src="engine.js"></script>
+<script>
+"use strict";
+
+const canvas = document.getElementById("view");
+const ctx = canvas.getContext("2d");
+const fpsEl = document.getElementById("fps");
+const msEl = document.getElementById("ms");
+const resEl = document.getElementById("res");
+const resSel = document.getElementById("ressel");
+const wSel = document.getElementById("wsel");
+const warn = document.getElementById("warn");
+
+// --- Vérif de l'isolation cross-origin (requise pour SharedArrayBuffer) ---
+if (!self.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
+  warn.hidden = false;
+  warn.innerHTML = "SharedArrayBuffer indisponible : la page doit être servie en " +
+    "<b>http(s)</b> avec les en-têtes COOP/COEP (pas en file://).<br>" +
+    "Lance : <code>python3 web/serve.py</code> puis ouvre " +
+    "<code>http://localhost:8000/index-mt.html</code>.";
+  throw new Error("crossOriginIsolated requis");
+}
+
+const HW = navigator.hardwareConcurrency || 4;
+for (let k = 1; k <= HW; k++) {
+  const o = document.createElement("option");
+  o.value = k; o.textContent = k + (k === HW ? " (max)" : "");
+  wSel.appendChild(o);
+}
+wSel.value = HW;
+
+// --- Caméra orbitale (mêmes constantes que le C# / le portage mono-thread) ---
+const OrbitSensitivity = 0.008, PanSensitivity = 0.0015;
+const MinPitch = -1.4, MaxPitch = 1.4, MinRadius = 1.5, MaxRadius = 40;
+let orbitTarget = V(0, 0.5, 0), orbitYaw, orbitPitch, orbitRadius;
+(function initCamera() {
+  const off = sub(V(3, 2, 4), orbitTarget);
+  orbitRadius = len(off);
+  orbitYaw = Math.atan2(off.x, off.z);
+  orbitPitch = Math.asin(off.y / orbitRadius);
+})();
+function getOrbitCamera() {
+  const cp = Math.cos(orbitPitch);
+  const pos = add(orbitTarget, V(
+    orbitRadius * cp * Math.sin(orbitYaw),
+    orbitRadius * Math.sin(orbitPitch),
+    orbitRadius * cp * Math.cos(orbitYaw)));
+  return cameraCreate(pos, orbitTarget);
+}
+const BallRestY = 0.5, BallX = -1, BallZ = 1.5, BounceHeight = 1.3, BouncePeriod = 1.1;
+function getBouncingBallCenter() {
+  const t = (performance.now() / 1000) % BouncePeriod;
+  const h = 4 * BounceHeight * t * (BouncePeriod - t) / (BouncePeriod * BouncePeriod);
+  return V(BallX, BallRestY + h, BallZ);
+}
+
+// --- Souris ---
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("mousemove", (e) => {
+  if (e.buttons & 1) {
+    orbitYaw -= e.movementX * OrbitSensitivity;
+    orbitPitch += e.movementY * OrbitSensitivity;
+    orbitPitch = Math.max(MinPitch, Math.min(MaxPitch, orbitPitch));
+  } else if (e.buttons & 2) {
+    const cam = getOrbitCamera();
+    const step = orbitRadius * PanSensitivity;
+    orbitTarget = sub(orbitTarget,
+      add(scale(e.movementX * step, scale(1 / 1.5, cam.right)),
+          scale(e.movementY * step, scale(1 / 1.5, cam.up))));
+  }
+});
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  orbitRadius *= e.deltaY < 0 ? 0.9 : 1.1;
+  orbitRadius = Math.max(MinRadius, Math.min(MaxRadius, orbitRadius));
+}, { passive: false });
+
+// --- Pool de workers + framebuffer partagé ---
+let W = 300, H = 300;
+let sab, shared, imageData;
+let workers = [], bands = [];
+let pending = 0, frameStart = 0, frameId = 0;
+let fpsAccum = 0, fpsFrames = 0, fpsLast = 0;
+
+function teardown() {
+  for (const w of workers) w.terminate();
+  workers = [];
+}
+
+function rebuild() {
+  teardown();
+  const nWorkers = parseInt(wSel.value, 10);
+  W = H = parseInt(resSel.value, 10);
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = "600px"; canvas.style.height = "600px";
+  resEl.textContent = W + " × " + H + "  ·  " + nWorkers + " w";
+
+  sab = new SharedArrayBuffer(W * H * 4);
+  shared = new Uint8ClampedArray(sab);
+  imageData = ctx.createImageData(W, H);
+
+  // Découpe l'image en bandes de lignes contiguës, une par worker.
+  bands = [];
+  const rows = Math.ceil(H / nWorkers);
+  for (let k = 0; k < nWorkers; k++) {
+    const y0 = k * rows, y1 = Math.min(H, y0 + rows);
+    if (y0 < y1) bands.push({ y0, y1 });
+  }
+  for (let k = 0; k < bands.length; k++) {
+    const w = new Worker("worker.js");
+    w.onmessage = onWorkerDone;
+    w.postMessage({ type: "init", sab, W, H });
+    workers.push(w);
+  }
+  pending = 0;   // une frame éventuellement en vol a été abandonnée (workers terminés)
+  fpsAccum = 0; fpsFrames = 0; fpsLast = performance.now();
+  requestAnimationFrame(frame);
+}
+resSel.addEventListener("change", rebuild);
+wSel.addEventListener("change", rebuild);
+
+function frame() {
+  if (pending > 0) return;   // une frame est déjà en cours : évite tout double-dispatch
+  frameStart = performance.now();
+  frameId++;
+  const cam = getOrbitCamera();
+  const ball = getBouncingBallCenter();
+  pending = bands.length;
+  for (let k = 0; k < bands.length; k++) {
+    workers[k].postMessage({ type: "render", id: frameId, band: k, cam, ball, y0: bands[k].y0, y1: bands[k].y1 });
+  }
+}
+
+function onWorkerDone(e) {
+  if (e.data.id !== frameId) return;     // message d'une frame obsolète (après rebuild)
+  if (--pending > 0) return;
+  // Toutes les bandes sont prêtes : copie le partagé -> ImageData -> canvas.
+  imageData.data.set(shared);
+  ctx.putImageData(imageData, 0, 0);
+
+  const dt = performance.now() - frameStart;
+  fpsAccum += dt; fpsFrames++;
+  if (frameStart - fpsLast > 500) {
+    const avg = fpsAccum / fpsFrames;
+    fpsEl.textContent = (1000 / avg).toFixed(1);
+    msEl.textContent = avg.toFixed(1);
+    fpsAccum = 0; fpsFrames = 0; fpsLast = frameStart;
+  }
+  requestAnimationFrame(frame);
+}
+
+rebuild();
+</script>
+</body>
+</html>

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ray Tracer — portage JS pur</title>
+<style>
+  html, body { margin: 0; background: #111; color: #ddd; font: 14px/1.4 system-ui, sans-serif; }
+  .wrap { display: flex; gap: 16px; padding: 16px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { background: #000; image-rendering: pixelated; cursor: grab; border: 1px solid #333; }
+  canvas:active { cursor: grabbing; }
+  .panel { min-width: 220px; }
+  .stat { font-variant-numeric: tabular-nums; }
+  .stat b { color: #fff; font-size: 22px; }
+  label { display: block; margin: 10px 0 4px; color: #9ab; }
+  select { background: #222; color: #ddd; border: 1px solid #444; padding: 4px; }
+  .hint { color: #889; margin-top: 14px; }
+  code { color: #cda; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="view"></canvas>
+  <div class="panel">
+    <h2>Ray Tracer — JS pur</h2>
+    <div class="stat"><b id="fps">—</b> fps</div>
+    <div class="stat"><span id="ms">—</span> ms / frame &nbsp;·&nbsp; <span id="res">—</span></div>
+    <label for="ressel">Résolution de rendu</label>
+    <select id="ressel">
+      <option value="200">200 × 200</option>
+      <option value="300">300 × 300</option>
+      <option value="450">450 × 450</option>
+      <option value="600" selected>600 × 600</option>
+      <option value="800">800 × 800</option>
+    </select>
+    <div class="hint">
+      Clic gauche : orbiter<br>
+      Clic droit : déplacer (pan)<br>
+      Molette : zoom
+      <p>Mono-thread (1 cœur). Le portage C#/Raylib utilise <code>Parallel.For</code> (tous les cœurs).</p>
+    </div>
+  </div>
+</div>
+<script>
+"use strict";
+
+// ---------- Vecteurs (objets {x,y,z}, comme System.Numerics.Vector3 côté C#) ----------
+const V = (x, y, z) => ({ x, y, z });
+const add  = (a, b) => V(a.x + b.x, a.y + b.y, a.z + b.z);
+const sub  = (a, b) => V(a.x - b.x, a.y - b.y, a.z - b.z);
+const scale= (s, a) => V(s * a.x, s * a.y, s * a.z);
+const dot  = (a, b) => a.x * b.x + a.y * b.y + a.z * b.z;
+const cross= (a, b) => V(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+const len  = (a) => Math.sqrt(dot(a, a));
+const norm = (a) => { const l = len(a); return V(a.x / l, a.y / l, a.z / l); };
+
+// ---------- Couleurs (record struct Color côté C#) ----------
+const C = (r, g, b) => ({ r, g, b });
+const cTimesS = (n, v) => C(n * v.r, n * v.g, n * v.b);
+const cTimes  = (a, b) => C(a.r * b.r, a.g * b.g, a.b * b.b);
+const cPlus   = (a, b) => C(a.r + b.r, a.g + b.g, a.b + b.b);
+const BACKGROUND = C(0, 0, 0);
+const legal = (d) => d > 1 ? 1 : d < 0 ? 0 : d;
+
+// ---------- Surfaces ----------
+const checkerWhite = C(1, 1, 1), checkerBlack = C(0, 0, 0), whiteSpec = C(1, 1, 1);
+const CheckerBoard = {
+  diffuse: (p) => ((Math.floor(p.z) + Math.floor(p.x)) % 2 !== 0) ? checkerWhite : checkerBlack,
+  specular: (_) => whiteSpec,
+  reflect: (p) => ((Math.floor(p.z) + Math.floor(p.x)) % 2 !== 0) ? 0.1 : 0.7,
+  roughness: 150,
+};
+const shinyDiff = C(1, 1, 1), shinySpec = C(0.5, 0.5, 0.5);
+const Shiny = {
+  diffuse: (_) => shinyDiff,
+  specular: (_) => shinySpec,
+  reflect: (_) => 0.6,
+  roughness: 50,
+};
+
+// ---------- Objets de scène ----------
+function Sphere(center, radius, surface) { return { kind: "sphere", center, radius, surface }; }
+function Plane(normal, offset, surface)  { return { kind: "plane", normal, offset, surface }; }
+
+// Renvoie la distance d'intersection (>0) ou 0 si pas de hit (mirror du C# : null -> 0).
+function intersect(obj, ray) {
+  if (obj.kind === "sphere") {
+    const eo = sub(obj.center, ray.start);
+    const v = dot(eo, ray.dir);
+    if (v < 0) return 0;
+    const disc = obj.radius * obj.radius - (dot(eo, eo) - v * v);
+    if (disc < 0) return 0;
+    return v - Math.sqrt(disc);
+  } else { // plane
+    const denom = dot(obj.normal, ray.dir);
+    if (denom > 0) return 0;
+    return (dot(obj.normal, ray.start) + obj.offset) / (-denom);
+  }
+}
+function normalAt(obj, pos) {
+  return obj.kind === "sphere" ? norm(sub(pos, obj.center)) : obj.normal;
+}
+
+// ---------- Lumières & scène ----------
+const Lights = [
+  { pos: V(-2,   2.5, 0),    color: C(0.49, 0.07, 0.07) },
+  { pos: V( 1.5, 2.5, 1.5),  color: C(0.07, 0.07, 0.49) },
+  { pos: V( 1.5, 2.5, -1.5), color: C(0.07, 0.49, 0.071) },
+  { pos: V( 0,   3.5, 0),    color: C(0.21, 0.21, 0.35) },
+];
+const BouncingBallRadius = 0.5;
+const GroundPlane = Plane(V(0, 1, 0), 0, CheckerBoard);
+const BigSphere = Sphere(V(0, 1, 0), 1, Shiny);
+
+function createScene(camera, ballCenter) {
+  return {
+    things: [GroundPlane, BigSphere, Sphere(ballCenter, BouncingBallRadius, Shiny)],
+    lights: Lights,
+    camera,
+  };
+}
+
+// ---------- Caméra ----------
+function cameraCreate(pos, lookAt) {
+  const forward = norm(sub(lookAt, pos));
+  const down = V(0, -1, 0);
+  const right = scale(1.5, norm(cross(forward, down)));
+  const up = scale(1.5, norm(cross(forward, right)));
+  return { pos, forward, up, right };
+}
+
+// ---------- Ray tracing (mirror exact de TraceRay) ----------
+const MaxDepth = 5;
+const ShadowEpsilon = 1e-4;
+const GREY = C(0.5, 0.5, 0.5);
+
+function traceRay(ray, scene, depth) {
+  let nearest = null, nearestDist = 0;
+  for (const thing of scene.things) {
+    const d = intersect(thing, ray);
+    if (d !== 0 && (nearest === null || d < nearestDist)) { nearest = thing; nearestDist = d; }
+  }
+  if (nearest === null) return BACKGROUND;
+
+  const d = ray.dir;
+  const pos = add(scale(nearestDist, d), ray.start);
+  const normal = normalAt(nearest, pos);
+  const reflectDir = sub(d, scale(2 * dot(normal, d), normal));
+
+  const shadowOrigin = add(pos, scale(ShadowEpsilon, normal));
+  let naturalColor = BACKGROUND;
+  const surf = nearest.surface;
+  for (const light of scene.lights) {
+    const ldis = sub(light.pos, pos);
+    const livec = norm(ldis);
+    const testRay = { start: shadowOrigin, dir: livec };
+
+    let neatIsect = 0;
+    for (const thing of scene.things) {
+      const inter = intersect(thing, testRay);
+      if (inter !== 0 && (neatIsect === 0 || inter < neatIsect)) neatIsect = inter;
+    }
+    const isInShadow = !((neatIsect > len(ldis)) || (neatIsect === 0));
+    if (isInShadow) continue;
+
+    const illum = dot(livec, normal);
+    const lcolor = illum > 0 ? cTimesS(illum, light.color) : BACKGROUND;
+    const specular = dot(livec, norm(reflectDir));
+    const scolor = specular > 0 ? cTimesS(Math.pow(specular, surf.roughness), light.color) : BACKGROUND;
+    naturalColor = cPlus(naturalColor,
+      cPlus(cTimes(surf.diffuse(pos), lcolor), cTimes(surf.specular(pos), scolor)));
+  }
+
+  const reflectPos = add(pos, scale(0.001, reflectDir));
+  const reflectColor = depth >= MaxDepth
+    ? GREY
+    : cTimesS(surf.reflect(reflectPos), traceRay({ start: reflectPos, dir: reflectDir }, scene, depth + 1));
+
+  return cPlus(naturalColor, reflectColor);
+}
+
+function render(scene, img, width, height) {
+  const data = img.data;
+  const scaleF = 2 * height;
+  const cam = scene.camera;
+  let i = 0;
+  for (let y = 0; y < height; y++) {
+    const recenterY = -(y - height / 2) / scaleF;
+    for (let x = 0; x < width; x++) {
+      const recenterX = (x - width / 2) / scaleF;
+      const point = norm(add(cam.forward, add(scale(recenterX, cam.right), scale(recenterY, cam.up))));
+      const col = traceRay({ start: cam.pos, dir: point }, scene, 0);
+      data[i++] = legal(col.r) * 255;
+      data[i++] = legal(col.g) * 255;
+      data[i++] = legal(col.b) * 255;
+      data[i++] = 255;
+    }
+  }
+}
+
+// ---------- Hôte (fenêtre / souris / boucle) ----------
+const canvas = document.getElementById("view");
+const ctx = canvas.getContext("2d");
+const fpsEl = document.getElementById("fps");
+const msEl = document.getElementById("ms");
+const resEl = document.getElementById("res");
+const resSel = document.getElementById("ressel");
+
+let W = 600, H = 600, imageData;
+function setResolution(n) {
+  W = H = n;
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = "600px"; canvas.style.height = "600px";
+  imageData = ctx.createImageData(W, H);
+  resEl.textContent = W + " × " + H;
+}
+resSel.addEventListener("change", () => setResolution(parseInt(resSel.value, 10)));
+setResolution(600);
+
+// Caméra orbitale (mêmes constantes que le C#)
+const OrbitSensitivity = 0.008, PanSensitivity = 0.0015;
+const MinPitch = -1.4, MaxPitch = 1.4, MinRadius = 1.5, MaxRadius = 40;
+let orbitTarget = V(0, 0.5, 0), orbitYaw, orbitPitch, orbitRadius;
+(function initCamera() {
+  const off = sub(V(3, 2, 4), orbitTarget);
+  orbitRadius = len(off);
+  orbitYaw = Math.atan2(off.x, off.z);
+  orbitPitch = Math.asin(off.y / orbitRadius);
+})();
+function getOrbitCamera() {
+  const cp = Math.cos(orbitPitch);
+  const pos = add(orbitTarget, V(
+    orbitRadius * cp * Math.sin(orbitYaw),
+    orbitRadius * Math.sin(orbitPitch),
+    orbitRadius * cp * Math.cos(orbitYaw)));
+  return cameraCreate(pos, orbitTarget);
+}
+
+// Rebond : h(t) = 4 H t (P - t) / P^2
+const BallRestY = BouncingBallRadius, BallX = -1, BallZ = 1.5, BounceHeight = 1.3, BouncePeriod = 1.1;
+function getBouncingBallCenter() {
+  const t = (performance.now() / 1000) % BouncePeriod;
+  const h = 4 * BounceHeight * t * (BouncePeriod - t) / (BouncePeriod * BouncePeriod);
+  return V(BallX, BallRestY + h, BallZ);
+}
+
+// Souris
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("mousemove", (e) => {
+  if (e.buttons & 1) { // gauche : orbite
+    orbitYaw -= e.movementX * OrbitSensitivity;
+    orbitPitch += e.movementY * OrbitSensitivity;
+    orbitPitch = Math.max(MinPitch, Math.min(MaxPitch, orbitPitch));
+  } else if (e.buttons & 2) { // droit : pan
+    const cam = getOrbitCamera();
+    const camRight = scale(1 / 1.5, cam.right);
+    const camUp = scale(1 / 1.5, cam.up);
+    const step = orbitRadius * PanSensitivity;
+    orbitTarget = sub(orbitTarget, add(scale(e.movementX * step, camRight), scale(e.movementY * step, camUp)));
+  }
+});
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  orbitRadius *= e.deltaY < 0 ? 0.9 : 1.1;
+  orbitRadius = Math.max(MinRadius, Math.min(MaxRadius, orbitRadius));
+}, { passive: false });
+
+// Boucle de rendu
+let lastFpsUpdate = 0, frames = 0, msAccum = 0;
+function frame() {
+  const t0 = performance.now();
+  const scene = createScene(getOrbitCamera(), getBouncingBallCenter());
+  render(scene, imageData, W, H);
+  ctx.putImageData(imageData, 0, 0);
+  const dt = performance.now() - t0;
+
+  frames++; msAccum += dt;
+  if (t0 - lastFpsUpdate > 500) {
+    const avg = msAccum / frames;
+    fpsEl.textContent = (1000 / avg).toFixed(1);
+    msEl.textContent = avg.toFixed(1);
+    frames = 0; msAccum = 0; lastFpsUpdate = t0;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
