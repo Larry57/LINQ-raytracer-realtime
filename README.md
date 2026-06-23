@@ -21,6 +21,7 @@ The main building blocks:
 - **Cross-platform host** - the framebuffer is uploaded to a GPU texture each frame via Raylib-cs; `Parallel.For` ray-traces the rows.
 - **Allocation-free engine** - rays are structs, scene objects a tagged struct switched on (no per-ray heap churn), `System.Numerics.Vector3` SIMD throughout.
 - **Continuous animation** - the small sphere bounces in a loop, independently of user input.
+- **GPU variant** - the very same scene running entirely in a GLSL fragment shader (one GPU thread per pixel), with a self-contained C# host in [`gpu-cs/`](gpu-cs/). See [BENCHMARK.md](BENCHMARK.md) for the cross-language race (C# / JS / C / Rust / GPU).
 
 ## Running it
 

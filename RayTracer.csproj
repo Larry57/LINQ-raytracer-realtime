@@ -13,4 +13,9 @@
     <PackageReference Include="Raylib-cs" Version="7.0.1" />
   </ItemGroup>
 
+  <!-- Le viewer GPU est un projet autonome (gpu-cs/), à exclure de ce glob. -->
+  <ItemGroup>
+    <Compile Remove="gpu-cs/**/*.cs" />
+  </ItemGroup>
+
 </Project>

@@ -22,10 +22,15 @@ indirections, ordonnancement) et le matériel.
 | 🥈 | **C** (gcc + OpenMP) | 22,1 fps | 124 fps |
 | 🥉 | **C#** (.NET 10, alloc-free) | 20,4 fps | 103 fps |
 | 4 | **JavaScript** (V8 + Web Workers) | ~8,5 fps | 38 fps |
-| — | **GPU** (shader GLSL) | — | **~4500 fps** 🔥 |
+| — | **GPU** (shader GLSL, hôte C *ou* C#) | — | **~4500 fps** 🔥 |
 
 Le GPU est **hors-concours** : ~37× le meilleur CPU. Normal — le ray tracing,
 c'est *fait* pour lui (un thread par pixel, 360 000 pixels indépendants).
+
+Le shader GLSL est **le même quel que soit l'hôte** : l'hôte ne fait que pousser
+les uniforms et dessiner un rectangle plein écran (travail négligeable). On a donc
+deux hôtes interchangeables — un en **C** (`c/gpu.c`) et un en **C#**
+(`gpu-cs/`) — qui chargent à l'identique `c/shader.fs` et tournent au même framerate.
 
 ---
 
@@ -67,7 +72,8 @@ c'est *fait* pour lui (un thread par pixel, 360 000 pixels indépendants).
 | JS (multi-thread) | `web/` | `python3 web/serve.py` → http://localhost:8000/index-mt.html | ✅ `<canvas>` |
 | C | `c/` | `gcc -O2 -march=native -fopenmp c/viewer.c -o c/viewer $(pkg-config --cflags --libs raylib) -lm` puis `./c/viewer` | ✅ raylib |
 | Rust | `rust/` | `cargo build --release` puis `./rust/target/release/viewer` | ✅ raylib (FFI) |
-| GPU | `c/` | `gcc -O2 c/gpu.c -o c/gpu $(pkg-config --cflags --libs raylib) -lm` puis `./c/gpu` | ✅🔥 shader |
+| GPU (C) | `c/` | `gcc -O2 c/gpu.c -o c/gpu $(pkg-config --cflags --libs raylib) -lm` puis `./c/gpu` | ✅🔥 shader |
+| GPU (C#) | `gpu-cs/` | `dotnet run --project gpu-cs/RayTracerGpu.csproj -c Release` | ✅🔥 shader |
 
 Et les **benchmarks headless** (mêmes chiffres que le podium) :
 
